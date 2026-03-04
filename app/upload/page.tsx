@@ -29,14 +29,8 @@ export default function TicketUpload() {
   const [result, setResult] = useState<any>(null);
 
   const getApiBaseUrl = () => {
-    if (process.env.NEXT_PUBLIC_API_BASE_URL) {
-      return process.env.NEXT_PUBLIC_API_BASE_URL;
-    }
-
-    if (typeof window !== 'undefined') {
-      return `${window.location.protocol}//${window.location.hostname}:8000`;
-    }
-
+    if (process.env.NEXT_PUBLIC_API_BASE_URL) return process.env.NEXT_PUBLIC_API_BASE_URL;
+    if (typeof window !== 'undefined') return `${window.location.protocol}//${window.location.hostname}:8000`;
     return 'http://localhost:8000';
   };
 
@@ -45,6 +39,7 @@ export default function TicketUpload() {
     if (!file) return;
 
     setLoading(true);
+    setResult(null); // Clear previous results
     try {
       const options = { maxSizeMB: 1, maxWidthOrHeight: 1920, useWebWorker: true };
       const compressedFile = await imageCompression(file, options);
@@ -60,23 +55,11 @@ export default function TicketUpload() {
         body: formData,
       });
 
-      if (!response.ok) {
-        throw new Error(`API error: ${response.status}`);
-      }
-
-      const contentType = response.headers.get('content-type');
-      if (!contentType || !contentType.includes('application/json')) {
-        throw new Error('API did not return JSON');
-      }
-
+      if (!response.ok) throw new Error(`API error: ${response.status}`);
       const data = await response.json();
       setResult(data);
-    } catch (error) {
-      console.error("Upload failed:", error);
-      setResult({
-        status: 'error',
-        message: error instanceof Error ? error.message : 'Upload failed'
-      });
+    } catch {
+      setResult({ status: 'error', message: 'Upload failed' });
     } finally {
       setLoading(false);
     }
@@ -93,35 +76,26 @@ export default function TicketUpload() {
               <p className="text-gray-600">Take a photo or upload an image of your lottery ticket</p>
             </div>
             
-            {/* Camera/File Input */}
             <div className="flex justify-center">
-              <label className="cursor-pointer bg-gradient-to-r from-blue-600 to-blue-700 text-white px-8 py-4 rounded-lg shadow-md hover:shadow-lg hover:from-blue-700 hover:to-blue-800 transition font-semibold text-lg">
-                {loading ? (
-                  <span className="flex items-center gap-2">
-                    <span className="animate-spin">⏳</span> Processing...
-                  </span>
-                ) : (
-                  "📷 Take Photo / Upload"
-                )}
-                <input 
-                  type="file" 
-                  accept="image/*" 
-                  capture="environment"
-                  className="hidden" 
-                  onChange={handleFileChange}
-                  disabled={loading}
-                />
+              <label className="cursor-pointer bg-gradient-to-r from-blue-600 to-blue-700 text-white px-8 py-4 rounded-lg shadow-md hover:shadow-lg transition font-semibold text-lg">
+                {loading ? "⌛ Processing..." : "📷 Take Photo / Upload"}
+                <input type="file" accept="image/*" capture="environment" className="hidden" onChange={handleFileChange} disabled={loading} />
               </label>
             </div>
 
-            {/* Ticket Preview Overlay */}
+            {/* Ticket Preview */}
             {preview && (
-              <div className="relative w-full border-4 border-dashed border-blue-300 rounded-xl overflow-hidden bg-gray-100">
-                <img src={preview} alt="Ticket Preview" className="w-full h-auto" />
+              <div className="relative w-full border-4 border-dashed border-blue-300 rounded-xl overflow-hidden bg-gray-100 shadow-inner">
+                <img 
+                  src={preview} 
+                  alt="Ticket Preview" 
+                  className="w-full h-auto block"
+                />
+
                 {loading && (
                   <div className="absolute inset-0 bg-black/50 flex items-center justify-center">
                     <div className="text-white text-center">
-                      <div className="mb-3 text-2xl">🔍</div>
+                      <div className="mb-3 text-2xl animate-bounce">🔍</div>
                       <p className="font-semibold">Scanning Numbers...</p>
                     </div>
                   </div>
@@ -129,25 +103,37 @@ export default function TicketUpload() {
               </div>
             )}
 
-            {/* OCR Results Display */}
+            {/* Results UI (Keep as is) */}
             {result && result.status === 'success' && (
               <div className="w-full p-6 bg-gradient-to-r from-green-50 to-emerald-50 rounded-lg border-2 border-green-300">
-                <div className="flex items-center gap-2 mb-4">
-                  <span className="text-2xl">✓</span>
-                  <h2 className="font-bold text-green-800 text-lg">Extraction Complete</h2>
-                </div>
-                <div className="space-y-2 text-gray-800">
-                  <p><span className="font-semibold">Game:</span> {result.extracted_data.game_type}</p>
-                  <p><span className="font-semibold">Draw Date:</span> {result.extracted_data.draw_date}</p>
-                  <p className="mt-4 p-3 bg-white rounded border border-green-200">
-                    <span className="font-semibold block mb-2">Numbers:</span>
-                    <span className="text-lg font-mono text-blue-600">{result.extracted_data.numbers.join(', ')}</span>
-                  </p>
+                <h2 className="font-bold text-green-800 text-lg mb-4">✓ Extraction Complete</h2>
+                <div className="space-y-2">
+                  <p className="text-gray-900"><span className="font-semibold text-gray-950">Game:</span> {result.extracted_data?.game_type || 'N/A'}</p>
+                  <p className="text-gray-900"><span className="font-semibold text-gray-950">Draw Date:</span> {result.extracted_data?.draw_date || 'N/A'}</p>
+                  <div className="mt-4 p-3 bg-white rounded border border-green-200">
+                    <span className="font-semibold text-gray-950 block mb-2">Detected Numbers:</span>
+                    <div className="flex flex-wrap gap-2">
+                      {result.extracted_data?.numbers?.map((num: number | string, idx: number) => (
+                        <span key={idx} className="px-3 py-1 bg-blue-100 text-blue-900 rounded-full font-mono font-bold">
+                          {num}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
                 </div>
               </div>
             )}
 
-            {result && result.status !== 'success' && (
+            {/* Warning UI */}
+            {result && result.status === 'warning' && (
+              <div className="w-full p-6 bg-gradient-to-r from-yellow-50 to-amber-50 rounded-lg border-2 border-yellow-400">
+                <h2 className="font-bold text-yellow-800 text-lg mb-4">⚠️ {result.message || 'No numbers detected'}</h2>
+                <p className="text-gray-700 mb-2">Try taking a clearer photo with better lighting.</p>
+              </div>
+            )}
+
+            {/* Error UI */}
+            {result && result.status === 'error' && (
               <div className="w-full p-6 bg-gradient-to-r from-red-50 to-orange-50 rounded-lg border-2 border-red-300">
                 <p className="text-red-800 font-semibold">❌ Error: {result.message || 'Could not extract data. Please try again with a clearer image.'}</p>
               </div>
@@ -155,12 +141,10 @@ export default function TicketUpload() {
 
             {/* Info Box */}
             <div className="bg-blue-50 rounded-lg p-4 border border-blue-200">
-              <h3 className="font-semibold text-blue-800 mb-2">💡 Tips for Best Results:</h3>
-              <ul className="list-disc list-inside text-gray-700 space-y-1">
-                <li>Ensure good lighting</li>
-                <li>Keep the ticket straight and flat</li>
-                <li>Make sure numbers are clearly visible</li>
-              </ul>
+              <h3 className="font-semibold text-blue-800 mb-2">💡 Tip for taking picture:</h3>
+              <p className="text-sm text-gray-700">
+                Turn on your phone flashlight when lighting is dim, keep the ticket flat, and avoid shadows or glare for more accurate results.
+              </p>
             </div>
           </div>
         </div>
