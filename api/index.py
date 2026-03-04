@@ -53,7 +53,7 @@ except Exception:
     ocr_reader = None
 
 def get_ocr_reader():
-    """Lazy load OCR reader if not initialized"""
+    """Get OCR reader instance"""
     global ocr_reader
     if ocr_reader is None:
         try:
