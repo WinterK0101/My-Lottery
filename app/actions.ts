@@ -1,7 +1,4 @@
 'use server'
- 
-import webpush from 'web-push'
-import type { PushSubscription as WebPushSubscription } from 'web-push'
 
 type SerializedPushSubscription = {
   endpoint: string
@@ -11,50 +8,66 @@ type SerializedPushSubscription = {
     auth: string
   }
 }
- 
-webpush.setVapidDetails(
-  'mailto:loongkiat30@gmail.com',
-  process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY!,
-  process.env.VAPID_PRIVATE_KEY!
-)
- 
-let subscription: WebPushSubscription | null = null
+
+const FASTAPI_URL =
+  process.env.API_BASE_URL ||
+  process.env.NEXT_PUBLIC_API_BASE_URL ||
+  'http://localhost:8000'
  
 export async function subscribeUser(sub: SerializedPushSubscription) {
-  subscription = sub as WebPushSubscription
-  // In a production environment, you would want to store the subscription in a database
-  // For example: await db.subscriptions.create({ data: sub })
-  return { success: true }
+  try {
+    const response = await fetch(`${FASTAPI_URL}/api/subscribe`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(sub),
+    });
+
+    if (!response.ok) {
+      throw new Error('Failed to subscribe on backend');
+    }
+
+    return { success: true }
+  } catch (error) {
+    console.error('Subscribe error:', error)
+    return { success: false, error: String(error) }
+  }
 }
  
 export async function unsubscribeUser() {
-  subscription = null
-  // In a production environment, you would want to remove the subscription from the database
-  // For example: await db.subscriptions.delete({ where: { ... } })
-  return { success: true }
+  try {
+    const response = await fetch(`${FASTAPI_URL}/api/unsubscribe`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+    if (!response.ok) {
+      throw new Error('Failed to unsubscribe on backend');
+    }
+
+    return { success: true }
+  } catch (error) {
+    console.error('Unsubscribe error:', error)
+    return { success: false, error: String(error) }
+  }
 }
  
 export async function sendNotification(message: string) {
-  if (!subscription) {
-    throw new Error('No subscription available')
-  }
- 
   try {
-    await webpush.sendNotification(
-      subscription,
-      JSON.stringify({
-        title: 'Test Notification',
-        body: message,
-        icon: '/web-app-manifest-192x192.png',
-      }),
-      {
-        TTL: 60,
-        urgency: 'high',
-      }
-    )
+    const response = await fetch(`${FASTAPI_URL}/api/send-notification`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message }),
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data.error || data.detail || 'Failed to send notification');
+    }
+
     return { success: true }
   } catch (error) {
     console.error('Error sending push notification:', error)
-    return { success: false, error: 'Failed to send notification' }
+    return { success: false, error: String(error) }
   }
 }
