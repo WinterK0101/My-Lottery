@@ -1,6 +1,6 @@
 'use client';
 
-import Image from "next/image";
+import Link from "next/link";
 import { useState, useEffect } from "react";
 import { subscribeUser, unsubscribeUser, sendNotification } from './actions'; 
 
@@ -145,29 +145,45 @@ function PushNotificationManager() {
   }
  
   if (!isSupported) {
-    return <p>Push notifications are not supported in this browser.</p>
+    return <p className="text-red-600 p-4">Push notifications are not supported in this browser.</p>
   }
  
   return (
-    <div>
-      <h3>Push Notifications</h3>
+    <div className="bg-white rounded-lg shadow-md p-6 max-w-md mx-auto">
+      <h3 className="text-2xl font-bold mb-4 text-gray-800">Push Notifications</h3>
       {subscription ? (
         <>
-          <p>You are subscribed to push notifications.</p>
-          <button onClick={unsubscribeFromPush}>Unsubscribe</button>
+          <p className="text-green-600 mb-4 font-semibold">✓ You are subscribed to push notifications.</p>
+          <button 
+            onClick={unsubscribeFromPush}
+            className="mb-4 w-full px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700 transition"
+          >
+            Unsubscribe
+          </button>
           <input
             type="text"
             placeholder="Enter notification message"
             value={message}
             onChange={(e) => setMessage(e.target.value)}
+            className="w-full px-3 py-2 border border-gray-300 rounded mb-3 focus:outline-none focus:ring-2 focus:ring-blue-500"
           />
-          <button onClick={sendTestNotification}>Send Test</button>
+          <button 
+            onClick={sendTestNotification}
+            className="w-full px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 transition"
+          >
+            Send Test
+          </button>
         </>
       ) : (
         <>
-          <p>You are not subscribed to push notifications.</p>
-          {pushError ? <p>{pushError}</p> : null}
-          <button onClick={subscribeToPush}>Subscribe</button>
+          <p className="text-gray-600 mb-4">You are not subscribed to push notifications.</p>
+          {pushError ? <p className="text-red-600 mb-4 text-sm">{pushError}</p> : null}
+          <button 
+            onClick={subscribeToPush}
+            className="w-full px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700 transition"
+          >
+            Subscribe
+          </button>
         </>
       )}
     </div>
@@ -187,37 +203,59 @@ function InstallPrompt() {
   }, [])
  
   if (isStandalone) {
-    return null // Don't show install button if already installed
+    return null
   }
  
   return (
-    <div>
-      <h3>Install App</h3>
-      <button>Add to Home Screen</button>
+    <div className="bg-blue-50 rounded-lg shadow-md p-6 max-w-md mx-auto mt-6">
+      <h3 className="text-2xl font-bold mb-4 text-gray-800">Install App</h3>
+      <button className="w-full px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 transition mb-3">
+        Add to Home Screen
+      </button>
       {isIOS && (
-        <p>
+        <p className="text-sm text-gray-600">
           To install this app on your iOS device, tap the share button
-          <span role="img" aria-label="share icon">
-            {' '}
-            ⎋{' '}
-          </span>
+          <span role="img" aria-label="share icon" className="ml-1">⎋</span>
           and then "Add to Home Screen"
-          <span role="img" aria-label="plus icon">
-            {' '}
-            ➕{' '}
-          </span>
-          .
+          <span role="img" aria-label="plus icon" className="ml-1">➕</span>
         </p>
       )}
     </div>
   )
 }
+
+function Navigation() {
+  return (
+    <nav className="bg-gradient-to-r from-blue-600 to-blue-800 shadow-lg">
+      <div className="max-w-6xl mx-auto px-4 py-4 flex justify-between items-center">
+        <h1 className="text-white text-2xl font-bold">My Lottery</h1>
+        <div className="flex gap-4">
+          <Link href="/" className="text-white hover:text-blue-200 transition font-semibold">
+            Home
+          </Link>
+          <Link href="/upload" className="text-white hover:text-blue-200 transition font-semibold">
+            Upload
+          </Link>
+        </div>
+      </div>
+    </nav>
+  )
+}
  
 export default function Page() {
   return (
-    <div>
-      <PushNotificationManager />
-      <InstallPrompt />
-    </div>
+    <>
+      <Navigation />
+      <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 py-12 px-4">
+        <div className="max-w-6xl mx-auto">
+          <div className="mb-8">
+            <PushNotificationManager />
+          </div>
+          <div>
+            <InstallPrompt />
+          </div>
+        </div>
+      </div>
+    </>
   )
 }
