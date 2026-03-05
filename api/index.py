@@ -127,7 +127,7 @@ async def send_notification(req: NotificationRequest):
                 data=notification_payload,
                 vapid_private_key=vapid_private_key,
                 vapid_claims={
-                    "sub": "mailto:example@yourdomain.com"
+                    "sub": "mailto:notify@lottery-app.local"
                 }
             )
             return {"success": True, "message": "Notification sent"}
