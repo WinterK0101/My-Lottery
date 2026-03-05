@@ -12,7 +12,8 @@ from pathlib import Path
 import numpy as np
 from io import BytesIO
 from PIL import Image
-import easyocr
+from google.cloud import vision
+from google.oauth2 import service_account
 import re
 
 # Load environment variables from .env.local in parent directory
@@ -46,22 +47,43 @@ app.add_middleware(
 
 logger = logging.getLogger(__name__)
 
-# Initialize OCR reader (once on startup - cached)
-try:
-    ocr_reader = easyocr.Reader(['en'], gpu=False)  # Use CPU to avoid GPU issues
-except Exception:
-    ocr_reader = None
+# Initialize Google Cloud Vision client with credentials from environment
+vision_client = None
 
-def get_ocr_reader():
-    """Get OCR reader instance"""
-    global ocr_reader
-    if ocr_reader is None:
+def get_vision_client():
+    """Get Google Cloud Vision client instance using env vars only."""
+    global vision_client
+    if vision_client is None:
         try:
-            ocr_reader = easyocr.Reader(['en'], gpu=False)
+            import base64
+
+            creds_json_str = os.getenv("GOOGLE_CLOUD_CREDENTIALS")
+            if creds_json_str:
+                creds_json_str = creds_json_str.strip()
+                if len(creds_json_str) >= 2 and creds_json_str[0] == creds_json_str[-1] and creds_json_str[0] in {"\"", "'"}:
+                    creds_json_str = creds_json_str[1:-1]
+                creds_dict = json.loads(creds_json_str)
+                credentials = service_account.Credentials.from_service_account_info(creds_dict)
+                vision_client = vision.ImageAnnotatorClient(credentials=credentials)
+            else:
+                creds_b64 = os.getenv("GOOGLE_CLOUD_CREDENTIALS_B64")
+                if creds_b64:
+                    cleaned_b64 = "".join(creds_b64.strip().split())
+                    if len(cleaned_b64) >= 2 and cleaned_b64[0] == cleaned_b64[-1] and cleaned_b64[0] in {"\"", "'"}:
+                        cleaned_b64 = cleaned_b64[1:-1]
+                    padding = "=" * (-len(cleaned_b64) % 4)
+                    creds_json_decoded = base64.b64decode(cleaned_b64 + padding, validate=True).decode("utf-8")
+                    creds_dict = json.loads(creds_json_decoded)
+                    credentials = service_account.Credentials.from_service_account_info(creds_dict)
+                    vision_client = vision.ImageAnnotatorClient(credentials=credentials)
+                else:
+                    raise RuntimeError(
+                        "Missing Google Vision credentials. Set GOOGLE_CLOUD_CREDENTIALS or GOOGLE_CLOUD_CREDENTIALS_B64."
+                    )
         except Exception as e:
-            logger.error(f"Failed to initialize OCR reader: {e}", exc_info=True)
-            raise RuntimeError(f"OCR reader initialization failed: {e}")
-    return ocr_reader
+            logger.error(f"Failed to initialize Vision client: {e}", exc_info=True)
+            raise RuntimeError(f"Vision client initialization failed: {e}")
+    return vision_client
 
 # Store subscription in memory (in production, use a database)
 subscription = None
@@ -163,23 +185,50 @@ async def extract_lottery_data(file: UploadFile = File(...)):
         # Read and parse image
         try:
             contents = await file.read()
-            image = Image.open(BytesIO(contents))
-            image_array = np.array(image)
+            image_bytes = BytesIO(contents)
         except Exception as e:
             logger.error(f"Image reading error: {str(e)}")
             raise HTTPException(status_code=400, detail=f"Could not read image: {str(e)}")
         
-        # Run OCR with detailed results for internal filtering
+        # Run OCR using Google Cloud Vision API
         try:
-            reader = get_ocr_reader()
-            results_with_boxes = reader.readtext(image_array, detail=1)
+            client = get_vision_client()
+            image = vision.Image(content=contents)
+            response = client.text_detection(image=image)
+
+            if response.error and response.error.message:
+                raise RuntimeError(response.error.message)
+            
+            # Convert Vision API response to easyocr-like format
+            results_with_boxes = []
+            annotations = response.text_annotations
+            full_text = annotations[0].description if annotations else ""
+            
+            if not annotations:
+                results_with_boxes = []
+            else:
+                # Skip the first annotation (it's the full text)
+                for annotation in annotations[1:]:
+                    vertices = annotation.bounding_poly.vertices
+                    # Convert vertices to list of [x, y] coordinates
+                    bbox = [[int(v.x or 0), int(v.y or 0)] for v in vertices]
+                    if len(bbox) < 4:
+                        bbox = (bbox + [[0, 0], [0, 0], [0, 0], [0, 0]])[:4]
+                    text = annotation.description
+                    confidence = float(
+                        getattr(annotation, "confidence", 0.0)
+                        or getattr(annotation, "score", 0.0)
+                        or 0.95
+                    )
+                    results_with_boxes.append([bbox, text, confidence])
         except Exception as e:
             logger.error(f"OCR error: {str(e)}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"OCR processing failed: {str(e)}")
         
         # Extract text from OCR results - join into single string for regex matching
         text_strings = [text[1] for text in results_with_boxes]
-        full_text = " ".join(text_strings)
+        if not full_text:
+            full_text = " ".join(text_strings)
         confidence = np.mean([float(text[2]) for text in results_with_boxes]) if results_with_boxes else 0.0
         
         # Robust game type detection (handles OCR variants like "4 D", "4-D", "40", split tokens)
@@ -269,232 +318,71 @@ async def extract_lottery_data(file: UploadFile = File(...)):
         else:
             draw_date = datetime.now().strftime("%Y-%m-%d")
         
-        # Extract lottery numbers - find all 2-digit numbers
-        # Filter by confidence to avoid misreading background text
-        CONFIDENCE_THRESHOLD = 0.4  # Adjustable threshold for filtering low-confidence detections
-        
-        # Find boundary keywords to define the region of interest (ROI)
-        # Numbers should be between bet type (ORDINARY/SYSTEM 7-12/QUICKPICK) and 'DRAW'
-        top_boundary_y = None
-        draw_y = None
-        top_boundary_text = None
-        
-        for bbox, text, conf in results_with_boxes:
-            text_upper = text.upper()
-            coords = np.array(bbox)
-            centroid_y = np.mean(coords[:, 1])
-            
-            # Check for top boundary: ORDINARY, SYSTEM 7-12, QUICKPICK, ROLL
-            is_top_boundary = False
-            if 'ORDINARY' in text_upper:
-                is_top_boundary = True
-            elif 'QUICKPICK' in text_upper:
-                is_top_boundary = True
-            elif 'ROLL' in text_upper:
-                is_top_boundary = True
-            elif 'SYSTEM' in text_upper:
-                # Match SYSTEM followed by optional number (7-12)
-                # This catches "SYSTEM", "SYSTEM 7", "SYSTEM7", etc.
-                is_top_boundary = True
-            
-            if is_top_boundary:
-                # Take the lowest Y (topmost position) as the boundary
-                if top_boundary_y is None or centroid_y < top_boundary_y:
-                    top_boundary_y = centroid_y
-                    top_boundary_text = text
-            
-            # Check for bottom boundary: DRAW
-            if 'DRAW' in text_upper and 'DRAW' not in ['WITHDRAW', 'DRAWING']:
-                # Take the highest Y (bottommost position) as the boundary
-                if draw_y is None or centroid_y > draw_y:
-                    draw_y = centroid_y
-        
-        # Define ROI with some padding
-        Y_PADDING = 50  # pixels padding above/below boundaries
-        if top_boundary_y is not None and draw_y is not None:
-            # Ensure top boundary is above draw (smaller Y value)
-            y_min = min(top_boundary_y, draw_y) - Y_PADDING
-            y_max = max(top_boundary_y, draw_y) + Y_PADDING
-        elif top_boundary_y is not None:
-            # Only found top boundary, use it as reference
-            y_min = top_boundary_y - Y_PADDING
-            y_max = top_boundary_y + 400  # Assume numbers are within 400px below
-        else:
-            # No boundaries found, don't filter by region
-            y_min = None
-            y_max = None
-        
-        # First pass: collect all numbers with their positions
-        number_detections = []
-        for bbox, text, conf in results_with_boxes:
-            # Only process high-confidence detections for number extraction
-            if conf > CONFIDENCE_THRESHOLD:
-                # Find digits in this text fragment
-                digits = re.findall(r'\b\d{1,2}\b', text)
-                if digits:
-                    # Calculate centroid of bounding box
-                    coords = np.array(bbox)
-                    centroid_x = np.mean(coords[:, 0])
-                    centroid_y = np.mean(coords[:, 1])
-                    
-                    # Check if within ROI
-                    in_roi = True
-                    if y_min is not None and y_max is not None:
-                        in_roi = y_min <= centroid_y <= y_max
-                    
-                    for digit in digits:
-                        number_detections.append({
-                            'number': digit,
-                            'centroid_x': centroid_x,
-                            'centroid_y': centroid_y,
-                            'bbox': bbox,
-                            'conf': conf,
-                            'text': text,
-                            'in_roi': in_roi
-                        })
-        
-        # Filter by ROI
-        if y_min is not None and y_max is not None:
-            in_roi_detections = [det for det in number_detections if det['in_roi']]
-            number_detections = in_roi_detections
-        
-        # Additional filter: numbers should be horizontally aligned (similar Y-coordinates)
-        # Lottery numbers are typically printed on the same horizontal line
-        if len(number_detections) > 0:
-            Y_ALIGNMENT_THRESHOLD = 30  # pixels - max difference in Y-coordinate for horizontal alignment
-            
-            # Group numbers by Y-coordinate similarity
-            horizontal_groups = []
-            used_indices = set()
-            
-            for i, det in enumerate(number_detections):
-                if i in used_indices:
-                    continue
-                
-                # Start a new horizontal group with this detection
-                group = [i]
-                group_y_values = [det['centroid_y']]
-                
-                # Find all other detections with similar Y-coordinate
-                for j, other_det in enumerate(number_detections):
-                    if j <= i or j in used_indices:
-                        continue
-                    
-                    # Check if Y-coordinate is similar to any in the group
-                    y_diff = abs(det['centroid_y'] - other_det['centroid_y'])
-                    
-                    # Only add to group if aligned AND group hasn't reached expected size
-                    # This filters out groups with too many numbers
-                    if y_diff < Y_ALIGNMENT_THRESHOLD and len(group) < expected_number_count:
-                        group.append(j)
-                        group_y_values.append(other_det['centroid_y'])
-                        used_indices.add(j)
-                
-                used_indices.add(i)
-                avg_y = np.mean(group_y_values)
-                horizontal_groups.append({
-                    'indices': group,
-                    'avg_y': avg_y,
-                    'size': len(group)
-                })
-            
-            if len(horizontal_groups) > 1:
-                # Select the largest horizontal group (most numbers aligned)
-                largest_group = max(horizontal_groups, key=lambda g: g['size'])
-                aligned_detections = [number_detections[i] for i in largest_group['indices']]
-                number_detections = aligned_detections
-        
-        # Extract numbers from filtered detections
-        numbers_match = [det['number'] for det in number_detections]
+        # Extract lottery numbers from full OCR text
+        # Vision API is accurate enough; no need for complex ROI/alignment filtering
         
         # Filter for valid lottery numbers based on game type
         if detected_game_type == "TOTO":
-            # TOTO: number count depends on bet type
-            valid_numbers = [int(n) for n in numbers_match if 1 <= int(n) <= 49]
+            # TOTO: Extract from group marker lines (A-E) in order
+            target_count = expected_number_count if expected_number_count is not None else 6
+            
+            # Find the first group marker line (A through E for multiple bet groups)
+            first_marker_index = -1
+            lines = full_text.split('\n')
+            for i, line in enumerate(lines):
+                if re.search(r'^[A-E]\.', line) or re.search(r'^\s*[A-E]\.?\s+\d', line):
+                    first_marker_index = i
+                    break
+            
+            # Extract numbers from first marker onwards, including continuation lines
+            candidates = []
+            if first_marker_index >= 0:
+                # Collect all numbers from marker line onwards until we have enough
+                remaining_text = '\n'.join(lines[first_marker_index:])
+                all_numbers = re.findall(r'\b\d{1,2}\b', remaining_text)
+                for num_str in all_numbers:
+                    num = int(num_str)
+                    if 1 <= num <= 49:
+                        candidates.append(num)
+                        if len(candidates) >= target_count:
+                            break
+            
             # Remove duplicates while preserving order
             seen = set()
             numbers = []
-            for num in valid_numbers:
+            for num in candidates:
                 if num not in seen and num != 0:
                     seen.add(num)
                     numbers.append(num)
-            target_count = expected_number_count if expected_number_count is not None else 6
+            
             numbers = numbers[:target_count]
         elif detected_game_type == "4D":
-            # 4D: look for 4-digit numbers with ROI filtering
-            four_digit_detections = []
-            
-            for bbox, text, conf in results_with_boxes:
-                if conf > CONFIDENCE_THRESHOLD:
-                    four_digit_matches = re.findall(r'\b\d{4}\b', text)
-                    if four_digit_matches:
-                        # Calculate centroid
-                        coords = np.array(bbox)
-                        centroid_x = np.mean(coords[:, 0])
-                        centroid_y = np.mean(coords[:, 1])
-                        
-                        # Check if within ROI
-                        in_roi = True
-                        if y_min is not None and y_max is not None:
-                            in_roi = y_min <= centroid_y <= y_max
-                        
-                        for match in four_digit_matches:
-                            four_digit_detections.append({
-                                'number': int(match),
-                                'centroid_y': centroid_y,
-                                'conf': conf,
-                                'text': text,
-                                'in_roi': in_roi
-                            })
-            
-            # Filter by ROI (same as TOTO)
-            if y_min is not None and y_max is not None:
-                filtered_4d = [det for det in four_digit_detections if det['in_roi']]
-                four_digit_detections = filtered_4d
-            
-            # 4D only needs one number; pick the highest-confidence candidate after ROI filtering
-            if len(four_digit_detections) > 1:
-                best_4d = max(four_digit_detections, key=lambda det: det['conf'])
-                numbers = [best_4d['number']]
-
-            elif len(four_digit_detections) == 1:
-                numbers = [four_digit_detections[0]['number']]
+            # 4D: Extract first 4-digit number from full_text
+            four_digit_matches = re.findall(r'\b\d{4}\b', full_text)
+            if four_digit_matches:
+                numbers = [int(four_digit_matches[0])]
             else:
                 # Fallback: OCR may read leading "A." as "4" and produce a 5-digit number
-                five_digit_candidates = []
-                for bbox, text, conf in results_with_boxes:
-                    if conf <= CONFIDENCE_THRESHOLD:
-                        continue
-
-                    # Only consider 5-digit strings that start with 4 (e.g., 41234 -> 1234)
-                    prefixed_matches = re.findall(r'\b4\d{4}\b', text)
-                    if not prefixed_matches:
-                        continue
-
-                    coords = np.array(bbox)
-                    centroid_y = np.mean(coords[:, 1])
-
-                    in_roi = True
-                    if y_min is not None and y_max is not None:
-                        in_roi = y_min <= centroid_y <= y_max
-
-                    if not in_roi:
-                        continue
-
-                    for match in prefixed_matches:
-                        five_digit_candidates.append({
-                            'original': match,
-                            'number': int(match[1:]),
-                            'conf': conf
-                        })
-
-                if five_digit_candidates:
-                    best_5d = max(five_digit_candidates, key=lambda det: det['conf'])
-                    numbers = [best_5d['number']]
+                prefixed_matches = re.findall(r'\b4\d{4}\b', full_text)
+                if prefixed_matches:
+                    numbers = [int(prefixed_matches[0][1:])]
                 else:
                     numbers = []
-        
+
         if not numbers:
+            # Debug: log what was detected
+            debug_info = {
+                "game_type": detected_game_type,
+                "full_ocr_text": full_text[:200],  # First 200 chars
+                "total_detections": len(results_with_boxes),
+                "roi": {"y_min": y_min, "y_max": y_max},
+                "detection_samples": [
+                    {"text": det[1], "bbox_y_range": [int(np.min(det[0][:, 1])), int(np.max(det[0][:, 1]))]} 
+                    for det in results_with_boxes[:5]
+                ]
+            }
+            logger.error(f"No numbers extracted. Debug: {debug_info}")
+            
             return {
                 "status": "warning",
                 "message": "No lottery numbers detected. Please try a clearer image.",
@@ -505,7 +393,8 @@ async def extract_lottery_data(file: UploadFile = File(...)):
                     "numbers": [],
                     "expected_number_count": expected_number_count,
                     "confidence": round(confidence, 2)
-                }
+                },
+                "debug": debug_info
             }
         
         return {
@@ -518,6 +407,10 @@ async def extract_lottery_data(file: UploadFile = File(...)):
                 "expected_number_count": expected_number_count,
                 "confidence": round(confidence, 2),
                 "count": len(numbers)
+            },
+            "diagnostics": {
+                "total_vision_detections": len(results_with_boxes),
+                "full_ocr_text_preview": full_text[:300]
             }
         }
     
