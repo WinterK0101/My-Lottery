@@ -48,3 +48,6 @@ next-env.d.ts
 __pycache__
 *.py[cod]
 *$py.class
+
+# TOTO documentation (generated)
+/toto-documentation

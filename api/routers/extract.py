@@ -2,6 +2,7 @@ from datetime import datetime
 import logging
 import re
 from io import BytesIO
+from typing import Optional
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from google.cloud import vision
@@ -10,16 +11,132 @@ from PIL import Image
 
 try:
     from ..services.vision import get_vision_client
+    from ..services.combinations import (
+        expand_toto_combinations,
+        expand_toto_system_roll,
+        validate_system_type,
+    )
+    from ..services.supabase import get_supabase_client
 except ImportError:
     from services.vision import get_vision_client
+    from services.combinations import (
+        expand_toto_combinations,
+        expand_toto_system_roll,
+        validate_system_type,
+    )
+    from services.supabase import get_supabase_client
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
+def insert_ticket_to_supabase(
+    extracted_data: dict,
+    user_id: Optional[str] = None,
+) -> dict:
+    """
+    Insert extracted ticket data and expanded combinations into Supabase.
+    
+    Args:
+        extracted_data: The extracted lottery data from OCR
+        user_id: Optional user ID to associate with the ticket
+    
+    Returns:
+        Dict with ticket_id and status
+    """
+    try:
+        supabase = get_supabase_client()
+        
+        game_type = extracted_data.get("game_type")
+        ticket_type = extracted_data.get("ticket_type")
+        draw_date = extracted_data.get("draw_date")
+        numbers = extracted_data.get("numbers", [])
+        expanded_combinations = extracted_data.get("expanded_combinations", [])
+        confidence = extracted_data.get("confidence", 0.0)
+        combinations_count = extracted_data.get("combinations_count", 0)
+        
+        # Validate data before insertion
+        if not numbers:
+            logger.warning("Cannot insert ticket: no numbers extracted")
+            return {"status": "skipped", "reason": "no_numbers"}
+        
+        # Step 1: Insert main ticket record
+        ticket_data = {
+            "user_id": user_id,
+            "game_type": game_type,
+            "ticket_type": ticket_type,
+            "draw_date": draw_date,
+            "selected_numbers": numbers,
+            "combinations_count": combinations_count,
+            "ocr_confidence": confidence,
+            "metadata": {
+                "ocr_confidence": confidence,
+                "is_system_bet": "System" in (ticket_type or ""),
+                "is_system_roll": "System Roll" in (ticket_type or ""),
+            },
+            "status": "pending",
+        }
+        
+        # Insert ticket record
+        ticket_response = supabase.table("tickets").insert(ticket_data).execute()
+        
+        if not ticket_response.data:
+            logger.error(f"Failed to insert ticket: {ticket_response}")
+            return {"status": "error", "reason": "ticket_insert_failed"}
+        
+        inserted_ticket_id = ticket_response.data[0]["id"]
+        logger.info(f"Ticket inserted with ID: {inserted_ticket_id}")
+        
+        combinations_inserted = 0
+        
+        # Step 2: Insert expanded combinations (if available)
+        if expanded_combinations:
+            combinations_batch = []
+            
+            for idx, combination in enumerate(expanded_combinations):
+                combination_record = {
+                    "ticket_id": inserted_ticket_id,
+                    "combination_index": idx,
+                    "numbers": combination,
+                    "sorted_numbers": sorted(combination),
+                }
+                combinations_batch.append(combination_record)
+                
+                # Batch insert in chunks of 100
+                if len(combinations_batch) >= 100:
+                    insert_response = (
+                        supabase.table("ticket_combinations")
+                        .insert(combinations_batch)
+                        .execute()
+                    )
+                    combinations_inserted += len(combinations_batch)
+                    combinations_batch = []
+            
+            # Insert remaining combinations
+            if combinations_batch:
+                insert_response = (
+                    supabase.table("ticket_combinations")
+                    .insert(combinations_batch)
+                    .execute()
+                )
+                combinations_inserted += len(combinations_batch)
+            
+            logger.info(f"Inserted {combinations_inserted} combinations for ticket {inserted_ticket_id}")
+        
+        return {
+            "status": "success",
+            "ticket_id": inserted_ticket_id,
+            "combinations_inserted": combinations_inserted,
+        }
+    
+    except Exception as e:
+        logger.error(f"Error inserting ticket to Supabase: {str(e)}", exc_info=True)
+        return {"status": "error", "reason": str(e)}
+
+
 @router.post("/api/extract")
-async def extract_lottery_data(file: UploadFile = File(...)):
-    """Extract lottery numbers from ticket image using OCR"""
+async def extract_lottery_data(file: UploadFile = File(...), user_id: Optional[str] = None):
+    """Extract lottery numbers from ticket image using OCR and save to Supabase"""
     try:
         if not file:
             raise HTTPException(status_code=400, detail="No file provided")
@@ -246,17 +363,44 @@ async def extract_lottery_data(file: UploadFile = File(...)):
                 "debug": debug_info,
             }
 
+        # Expand combinations for TOTO System bets
+        expanded_combinations = None
+        if detected_game_type == "TOTO" and ticket_type:
+            try:
+                # Check if it's a System Roll
+                if "System Roll" in ticket_type:
+                    expanded_combinations = expand_toto_system_roll(numbers)
+                    logger.info(f"System Roll: {len(numbers)} numbers expanded to {len(expanded_combinations)} combinations")
+                else:
+                    # Check if it's a regular System bet (7-12)
+                    system_type = validate_system_type(ticket_type)
+                    if system_type:
+                        expanded_combinations = expand_toto_combinations(numbers, system_type)
+                        logger.info(f"System {system_type}: expanded to {len(expanded_combinations)} combinations")
+            except ValueError as e:
+                logger.warning(f"Combination expansion failed: {str(e)}")
+                # Continue without expanded combinations if validation fails
+
+        # Prepare extracted data for return and database insertion
+        extracted_data_dict = {
+            "game_type": detected_game_type,
+            "ticket_type": ticket_type,
+            "draw_date": draw_date,
+            "numbers": numbers,
+            "expected_number_count": expected_number_count,
+            "confidence": round(confidence, 2),
+            "count": len(numbers),
+            "expanded_combinations": expanded_combinations,
+            "combinations_count": len(expanded_combinations) if expanded_combinations else None,
+        }
+        
+        # Attempt to insert into Supabase
+        db_result = insert_ticket_to_supabase(extracted_data_dict, user_id=user_id)
+        
         return {
             "status": "success",
-            "extracted_data": {
-                "game_type": detected_game_type,
-                "ticket_type": ticket_type,
-                "draw_date": draw_date,
-                "numbers": numbers,
-                "expected_number_count": expected_number_count,
-                "confidence": round(confidence, 2),
-                "count": len(numbers),
-            },
+            "extracted_data": extracted_data_dict,
+            "database": db_result,
             "diagnostics": {
                 "total_vision_detections": len(results_with_boxes),
                 "full_ocr_text_preview": full_text[:300],
