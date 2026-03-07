@@ -19,19 +19,11 @@
   "crons": [
     {
       "path": "/api/cron/check-4d",
-      "schedule": "0-15 11 * * 1,4"
-    },
-    {
-      "path": "/api/cron/check-4d",
-      "schedule": "45-59 10 * * 1,4"
+      "schedule": "0 19 * * 1,4"
     },
     {
       "path": "/api/cron/check-toto",
-      "schedule": "45-59 10 * * 0,3,6"
-    },
-    {
-      "path": "/api/cron/check-toto",
-      "schedule": "0-15 11 * * 0,3,6"
+      "schedule": "0 19 * * 0,3,6"
     }
   ],
   "env": {
