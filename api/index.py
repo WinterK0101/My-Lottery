@@ -1,18 +1,21 @@
 from pathlib import Path
+import os
 
 from dotenv import load_dotenv
+
+# Load environment variables from .env.local in parent directory FIRST
+# This must be done before importing routers that need env vars
+env_path = Path(__file__).parent.parent / ".env.local"
+load_dotenv(dotenv_path=env_path)
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 try:
-    from .routers import extract, health, notifications
+    from .routers import extract, health, notifications, results, cron
 except ImportError:
-    from routers import extract, health, notifications
-
-# Load environment variables from .env.local in parent directory
-env_path = Path(__file__).parent.parent / ".env.local"
-load_dotenv(dotenv_path=env_path)
+    from routers import extract, health, notifications, results, cron
 
 app = FastAPI()
 
@@ -42,6 +45,8 @@ app.add_middleware(
 app.include_router(health.router)
 app.include_router(notifications.router)
 app.include_router(extract.router)
+app.include_router(results.router)
+app.include_router(cron.router)
 
 
 if __name__ == "__main__":

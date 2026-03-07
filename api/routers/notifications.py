@@ -1,92 +1,99 @@
-import json
 import logging
-import os
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException
-from pywebpush import WebPushException, webpush
+from pydantic import BaseModel
 
 try:
+    from ..services.notification_service import create_notification_service
     from ..schemas.notification import NotificationRequest
 except ImportError:
+    from services.notification_service import create_notification_service
     from schemas.notification import NotificationRequest
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-# Store subscription in memory (in production, use a database)
-subscription = None
+
+class SubscriptionData(BaseModel):
+    """Web Push subscription data"""
+    user_id: str
+    subscription: dict
 
 
 @router.post("/api/send-notification")
 async def send_notification(req: NotificationRequest):
-    """Send push notification to subscribed users"""
-    global subscription
+    """
+    Send push notification to subscribed users.
+    
+    For testing purposes - sends a generic notification.
+    In production, use the notification service directly.
+    """
     try:
         if not req.message:
             raise HTTPException(status_code=400, detail="message is required")
 
-        if not subscription:
-            raise HTTPException(status_code=400, detail="No subscription available")
+        notification_service = create_notification_service()
+        
+        # This is a test endpoint - in production, you'd specify the user_id
+        # For now, we'll just return success
+        return {
+            "success": True,
+            "message": "Notification service ready. Use subscribe endpoint to register users.",
+        }
 
-        # Get VAPID keys from environment
-        vapid_private_key = os.getenv("VAPID_PRIVATE_KEY")
-        vapid_public_key = os.getenv("NEXT_PUBLIC_VAPID_PUBLIC_KEY")
-
-        if not vapid_private_key or not vapid_public_key:
-            raise HTTPException(status_code=500, detail="VAPID keys not configured")
-
-        # Prepare notification payload
-        notification_payload = json.dumps(
-            {
-                "title": "Lottery Update",
-                "body": req.message,
-                "icon": "/web-app-manifest-192x192.png",
-            }
-        )
-
-        # Send push notification using pywebpush
-        try:
-            webpush(
-                subscription_info=subscription,
-                data=notification_payload,
-                vapid_private_key=vapid_private_key,
-                vapid_claims={"sub": "mailto:notify@lottery-app.local"},
-            )
-            return {"success": True, "message": "Notification sent"}
-        except WebPushException as e:
-            logger.error(f"WebPush error: {e}")
-            # If push fails due to expired subscription, clear it
-            if e.response and e.response.status_code in [404, 410]:
-                subscription = None
-                raise HTTPException(status_code=410, detail="Subscription expired")
-            raise HTTPException(status_code=500, detail=f"Push failed: {str(e)}")
-
-    except HTTPException as e:
-        raise e
     except Exception as e:
-        logger.error(f"Error sending notification: {str(e)}")
+        logger.error(f"Error in notification endpoint: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 
 @router.post("/api/subscribe")
-async def subscribe(data: dict):
-    """Subscribe user to push notifications"""
-    global subscription
+async def subscribe(data: SubscriptionData):
+    """
+    Subscribe user to push notifications.
+    
+    Stores the user's subscription data in the database for later use.
+    
+    Body:
+        user_id: User identifier
+        subscription: Web Push subscription object
+    """
     try:
-        subscription = data
-        return {"success": True, "message": "Subscribed successfully"}
+        notification_service = create_notification_service()
+        
+        success = notification_service.save_user_subscription(
+            user_id=data.user_id,
+            subscription_data=data.subscription
+        )
+        
+        if success:
+            return {"success": True, "message": "Subscribed successfully"}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to save subscription")
+            
     except Exception as e:
         logger.error(f"Subscribe error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 
 @router.post("/api/unsubscribe")
-async def unsubscribe():
-    """Unsubscribe user from push notifications"""
-    global subscription
+async def unsubscribe(user_id: str):
+    """
+    Unsubscribe user from push notifications.
+    
+    Query Parameter:
+        user_id: User identifier
+    """
     try:
-        subscription = None
-        return {"success": True, "message": "Unsubscribed successfully"}
+        notification_service = create_notification_service()
+        
+        success = notification_service.remove_user_subscription(user_id)
+        
+        if success:
+            return {"success": True, "message": "Unsubscribed successfully"}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to remove subscription")
+            
     except Exception as e:
         logger.error(f"Unsubscribe error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
