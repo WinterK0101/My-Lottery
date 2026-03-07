@@ -196,9 +196,8 @@ async def process_ticket(
     request: dict,
 ):
     """
-    Process a ticket using the new workflow:
-    - Case A (Future Draw): Returns pending status, ticket will be evaluated when results available
-    - Case B (Past Draw): Immediately checks for results and evaluates ticket
+    Process a ticket and send results via push notification.
+    The API returns a simple acknowledgment; detailed results are delivered via notification.
     
     Request body:
     {
@@ -206,7 +205,7 @@ async def process_ticket(
     }
     
     Returns:
-        Dict with processing status and evaluation if available
+        Dict with processing status (notification will be sent separately)
     """
     try:
         ticket_id = request.get("ticket_id")
@@ -227,7 +226,40 @@ async def process_ticket(
                 raise HTTPException(status_code=404, detail=result.get("message"))
             raise HTTPException(status_code=500, detail=result.get("message"))
 
-        return result
+        # Return minimal response - full results sent via notification
+        status = result.get("status")
+        ticket_id = result.get("ticket_id")
+        notification_sent = bool(result.get("notification_sent", False))
+        
+        # Build minimal response based on status
+        response = {
+            "status": status,
+            "ticket_id": ticket_id,
+        }
+        
+        if status == "success":
+            response["message"] = (
+                "Ticket evaluated successfully. Results sent via notification."
+                if notification_sent
+                else "Ticket evaluated successfully. Notification is not enabled or delivery failed."
+            )
+            response["notification_sent"] = notification_sent
+        elif status == "already_evaluated":
+            response["message"] = "Ticket was already evaluated."
+            response["notification_sent"] = False
+        elif status == "pending":
+            response["message"] = result.get("message", "Draw has not occurred yet. You'll be notified when results are available.")
+            response["draw_date"] = result.get("draw_date")
+            response["notification_sent"] = False
+        elif status == "no_results":
+            response["message"] = result.get("message", "Draw results not yet available. You'll be notified when results are released.")
+            response["draw_date"] = result.get("draw_date")
+            response["notification_sent"] = False
+        else:
+            response["message"] = result.get("message", "Ticket processed.")
+            response["notification_sent"] = False
+        
+        return response
 
     except HTTPException:
         raise

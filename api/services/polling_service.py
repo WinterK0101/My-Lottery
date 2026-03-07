@@ -227,13 +227,16 @@ class PollingService:
 
             if response.data:
                 logger.info(f"Updated ticket {ticket_id} with evaluation results")
+                notification_attempted = False
+                notification_sent = False
                 
                 # Send notification to user if user_id exists
                 user_id = ticket_data.get("user_id")
                 if user_id:
                     try:
+                        notification_attempted = True
                         prize_amount = evaluation.get("winning_amount", 0)
-                        self.notification_service.notify_ticket_result(
+                        notification_sent = self.notification_service.notify_ticket_result(
                             user_id=user_id,
                             ticket_id=ticket_id,
                             is_winner=is_winner,
@@ -243,7 +246,15 @@ class PollingService:
                             draw_date=ticket_data.get("draw_date", "Unknown"),
                             draw_id=ticket_data.get("draw_id")
                         )
-                        logger.info(f"Notification sent for ticket {ticket_id} to user {user_id}")
+
+                        if notification_sent:
+                            logger.info(
+                                f"Notification sent for ticket {ticket_id} to user {user_id}"
+                            )
+                        else:
+                            logger.info(
+                                f"Notification not sent for ticket {ticket_id}; no active subscription or delivery failure"
+                            )
                     except Exception as notify_err:
                         logger.error(f"Failed to send notification for ticket {ticket_id}: {str(notify_err)}")
                 
@@ -252,6 +263,8 @@ class PollingService:
                     "ticket_id": ticket_id,
                     "is_winner": is_winner,
                     "prize_tier": prize_tier,
+                    "notification_attempted": notification_attempted,
+                    "notification_sent": notification_sent,
                 }
             else:
                 return {
@@ -330,6 +343,7 @@ class PollingService:
                 return {
                     "status": "already_evaluated",
                     "ticket_id": ticket_id,
+                    "notification_sent": False,
                     "result": {
                         "is_winner": is_winner,
                         "prize_tier": prize_tier,
@@ -347,6 +361,7 @@ class PollingService:
                     "message": f"Draw has not occurred yet. Expected on {draw_date}.",
                     "ticket_id": ticket_id,
                     "draw_date": draw_date,
+                    "notification_sent": False,
                 }
 
             # Try to get results (from database or web)
@@ -364,6 +379,7 @@ class PollingService:
                     ),
                     "ticket_id": ticket_id,
                     "draw_date": draw_date,
+                    "notification_sent": False,
                 }
 
             # Evaluate ticket
@@ -387,6 +403,8 @@ class PollingService:
             return {
                 "status": "success",
                 "ticket_id": ticket_id,
+                "notification_sent": update_result.get("notification_sent", False),
+                "notification_attempted": update_result.get("notification_attempted", False),
                 "result": {
                     "is_winner": is_winner,
                     "prize_tier": prize_tier,

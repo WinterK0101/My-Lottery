@@ -12,9 +12,11 @@ import json
 try:
     from .supabase import get_supabase_client
     from .scraper import create_scraper
+    from ..schemas import LotteryResultCreate, GameType as SchemaGameType
 except ImportError:
     from services.supabase import get_supabase_client
     from services.scraper import create_scraper
+    from schemas import LotteryResultCreate, GameType as SchemaGameType
 
 logger = logging.getLogger(__name__)
 
@@ -50,40 +52,40 @@ class DrawResultsManager:
             Dict with status and stored result ID
         """
         try:
-            # Prepare data for database
+            # Parse draw_date
+            if isinstance(draw_date, str):
+                parsed_date = date.fromisoformat(draw_date)
+            else:
+                parsed_date = draw_date
+
+            # Create schema instance based on game type
             if game_type == "4D":
-                winning_numbers = {
-                    "first_prize": results_data.get("first_prize"),
-                    "second_prize": results_data.get("second_prize"),
-                    "third_prize": results_data.get("third_prize"),
-                    "starter": results_data.get("starter"),
-                    "consolation": results_data.get("consolation"),
-                }
-                additional_number = None
+                result_schema = LotteryResultCreate.create_4d_result(
+                    draw_date=parsed_date,
+                    draw_id=draw_id,
+                    first_prize=results_data.get("first_prize", []),
+                    second_prize=results_data.get("second_prize", []),
+                    third_prize=results_data.get("third_prize", []),
+                    starter=results_data.get("starter", []),
+                    consolation=results_data.get("consolation", []),
+                )
             elif game_type == "TOTO":
-                winning_numbers = {
-                    "winning_numbers": results_data.get("winning_numbers"),
-                }
-                additional_number = results_data.get("additional_number")
+                result_schema = LotteryResultCreate.create_toto_result(
+                    draw_date=parsed_date,
+                    draw_id=draw_id,
+                    winning_numbers=results_data.get("winning_numbers", []),
+                    additional_number=results_data.get("additional_number"),
+                )
             else:
                 return {
                     "status": "error",
                     "message": f"Invalid game_type: {game_type}",
                 }
 
-            # Insert into lottery_results table
-            insert_data = {
-                "game_type": game_type,
-                "draw_date": draw_date,
-                "draw_id": draw_id,
-                "winning_numbers": winning_numbers,
-                "additional_number": additional_number,
-            }
-
             # Use upsert to avoid duplicates
             response = (
                 self.supabase.table("lottery_results")
-                .upsert(insert_data, on_conflict="game_type,draw_date")
+                .upsert(result_schema.to_db_dict(), on_conflict="game_type,draw_date")
                 .execute()
             )
 

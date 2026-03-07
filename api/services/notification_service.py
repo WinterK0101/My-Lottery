@@ -6,13 +6,16 @@ Handles sending push notifications to users when their tickets are evaluated.
 import json
 import logging
 import os
+from datetime import datetime, timezone
 from typing import Optional, Dict, List
 from pywebpush import WebPushException, webpush
 
 try:
     from .supabase import get_supabase_client
+    from ..schemas import UserSubscriptionCreate, UserSubscriptionUpdate
 except ImportError:
     from services.supabase import get_supabase_client
+    from schemas import UserSubscriptionCreate, UserSubscriptionUpdate
 
 logger = logging.getLogger(__name__)
 
@@ -60,13 +63,22 @@ class NotificationService:
             True if successful, False otherwise
         """
         try:
+            if not user_id or not subscription_data:
+                logger.error("Cannot save subscription: missing user_id or subscription_data")
+                return False
+
+            # Create schema instance
+            subscription_schema = UserSubscriptionCreate(
+                user_id=user_id,
+                subscription_data=subscription_data,
+                is_active=True
+            )
+
             # Upsert subscription (update if exists, insert if not)
-            result = self.supabase.table("user_subscriptions").upsert({
-                "user_id": user_id,
-                "subscription_data": subscription_data,
-                "is_active": True,
-                "updated_at": "NOW()"
-            }, on_conflict="user_id").execute()
+            self.supabase.table("user_subscriptions").upsert(
+                subscription_schema.to_db_dict(),
+                on_conflict="user_id"
+            ).execute()
             
             logger.info(f"Saved subscription for user {user_id}")
             return True
@@ -85,10 +97,16 @@ class NotificationService:
             True if successful, False otherwise
         """
         try:
-            self.supabase.table("user_subscriptions").update({
-                "is_active": False,
-                "updated_at": "NOW()"
-            }).eq("user_id", user_id).execute()
+            if not user_id:
+                logger.error("Cannot remove subscription: missing user_id")
+                return False
+
+            # Create update schema
+            update_schema = UserSubscriptionUpdate(is_active=False)
+
+            self.supabase.table("user_subscriptions").update(
+                update_schema.to_db_dict()
+            ).eq("user_id", user_id).execute()
             
             logger.info(f"Removed subscription for user {user_id}")
             return True

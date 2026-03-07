@@ -14,12 +14,15 @@ const FASTAPI_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ||
   'http://localhost:8000'
  
-export async function subscribeUser(sub: SerializedPushSubscription) {
+export async function subscribeUser(userId: string, sub: SerializedPushSubscription) {
   try {
     const response = await fetch(`${FASTAPI_URL}/api/subscribe`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(sub),
+      body: JSON.stringify({
+        user_id: userId,
+        subscription: sub,
+      }),
     });
 
     if (!response.ok) {
@@ -33,12 +36,15 @@ export async function subscribeUser(sub: SerializedPushSubscription) {
   }
 }
  
-export async function unsubscribeUser() {
+export async function unsubscribeUser(userId: string) {
   try {
-    const response = await fetch(`${FASTAPI_URL}/api/unsubscribe`, {
+    const response = await fetch(
+      `${FASTAPI_URL}/api/unsubscribe?user_id=${encodeURIComponent(userId)}`,
+      {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-    });
+      }
+    );
 
     if (!response.ok) {
       throw new Error('Failed to unsubscribe on backend');

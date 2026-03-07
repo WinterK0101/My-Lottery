@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, date
 import logging
 import re
 from io import BytesIO
@@ -18,6 +18,12 @@ try:
         validate_system_type,
     )
     from ..services.supabase import get_supabase_client
+    from ..schemas import (
+        TicketCreate,
+        TicketMetadata,
+        GameType,
+        TicketCombinationBatch,
+    )
 except ImportError:
     from services.vision import get_vision_client
     from services.combinations import (
@@ -26,6 +32,12 @@ except ImportError:
         validate_system_type,
     )
     from services.supabase import get_supabase_client
+    from schemas import (
+        TicketCreate,
+        TicketMetadata,
+        GameType,
+        TicketCombinationBatch,
+    )
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -90,6 +102,10 @@ def insert_ticket_to_supabase(
         Dict with ticket_id and status
     """
     try:
+        # Default to fixed user_id if not provided
+        if not user_id:
+            user_id = 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d'
+        
         supabase = get_supabase_client()
         
         game_type = extracted_data.get("game_type")
@@ -112,7 +128,7 @@ def insert_ticket_to_supabase(
             try:
                 existing_ticket = (
                     supabase.table("tickets")
-                    .select("id, created_at, status, prize_tier")
+                    .select("id, created_at, status, prize_tier, user_id, game_type, draw_date, draw_id, winning_amount")
                     .eq("ticket_serial_number", ticket_serial_number)
                     .execute()
                 )
@@ -120,38 +136,69 @@ def insert_ticket_to_supabase(
                 if existing_ticket.data and len(existing_ticket.data) > 0:
                     existing = existing_ticket.data[0]
                     logger.info(f"Duplicate ticket detected: {ticket_serial_number}")
+                    
+                    # If ticket has been evaluated and has a user_id, re-send notification
+                    if existing.get("status") in ["won", "lost"] and existing.get("user_id"):
+                        try:
+                            from ..services.notification_service import create_notification_service
+                            notification_service = create_notification_service()
+                            
+                            is_winner = existing.get("status") == "won"
+                            prize_tier = existing.get("prize_tier", "No Prize")
+                            prize_amount = existing.get("winning_amount", 0)
+                            
+                            notification_sent = notification_service.notify_ticket_result(
+                                user_id=existing.get("user_id"),
+                                ticket_id=existing["id"],
+                                is_winner=is_winner,
+                                prize_tier=prize_tier,
+                                prize_amount=prize_amount,
+                                game_type=existing.get("game_type", "Unknown"),
+                                draw_date=existing.get("draw_date", "Unknown"),
+                                draw_id=existing.get("draw_id")
+                            )
+                            
+                            logger.info(f"Re-sent notification for duplicate ticket: {ticket_serial_number}, sent={notification_sent}")
+                        except Exception as notify_err:
+                            logger.error(f"Failed to re-send notification for duplicate: {str(notify_err)}")
+                    
                     return {
                         "status": "duplicate",
                         "ticket_id": existing["id"],
                         "message": f"This ticket was already uploaded on {existing['created_at']}",
                         "existing_ticket": existing,
+                        "notification_resent": existing.get("status") in ["won", "lost"],
                     }
             except Exception as dup_check_error:
                 logger.warning(f"Duplicate check failed: {str(dup_check_error)}")
                 # Continue with insertion if duplicate check fails
         
-        # Step 1: Insert main ticket record
-        ticket_data = {
-            "user_id": user_id,
-            "game_type": game_type,
-            "ticket_type": ticket_type,
-            "draw_date": draw_date,
-            "draw_id": draw_id,
-            "ticket_serial_number": ticket_serial_number,
-            "selected_numbers": numbers,
-            "combinations_count": combinations_count,
-            "ocr_confidence": confidence,
-            "image_url": image_url,
-            "metadata": {
-                "ocr_confidence": confidence,
-                "is_system_bet": "System" in (ticket_type or ""),
-                "is_system_roll": "System Roll" in (ticket_type or ""),
-            },
-            "status": "pending",
-        }
+        # Step 1: Insert main ticket record using schema
+        # For non-system tickets, combinations_count is 1 (the single selected combination)
+        final_combinations_count = combinations_count if combinations_count is not None else (
+            len(expanded_combinations) if expanded_combinations else 1
+        )
+        
+        ticket_schema = TicketCreate(
+            user_id=user_id,
+            game_type=GameType(game_type),
+            ticket_type=ticket_type,
+            draw_date=date.fromisoformat(draw_date) if isinstance(draw_date, str) else draw_date,
+            draw_id=draw_id,
+            ticket_serial_number=ticket_serial_number,
+            selected_numbers=numbers,
+            combinations_count=final_combinations_count,
+            ocr_confidence=confidence,
+            image_url=image_url,
+            metadata=TicketMetadata(
+                ocr_confidence=confidence,
+                is_system_bet="System" in (ticket_type or ""),
+                is_system_roll="System Roll" in (ticket_type or ""),
+            ),
+        )
         
         # Insert ticket record
-        ticket_response = supabase.table("tickets").insert(ticket_data).execute()
+        ticket_response = supabase.table("tickets").insert(ticket_schema.to_db_dict()).execute()
         
         if not ticket_response.data:
             logger.error(f"Failed to insert ticket: {ticket_response}")
@@ -162,37 +209,24 @@ def insert_ticket_to_supabase(
         
         combinations_inserted = 0
         
-        # Step 2: Insert expanded combinations (if available)
+        # Step 2: Insert expanded combinations using schema (if available)
         if expanded_combinations:
-            combinations_batch = []
+            # Create batch using schema
+            combinations_batch_schema = TicketCombinationBatch.from_ticket(
+                ticket_id=inserted_ticket_id,
+                combinations=expanded_combinations
+            )
             
-            for idx, combination in enumerate(expanded_combinations):
-                combination_record = {
-                    "ticket_id": inserted_ticket_id,
-                    "combination_index": idx,
-                    "numbers": combination,
-                    "sorted_numbers": sorted(combination),
-                }
-                combinations_batch.append(combination_record)
-                
-                # Batch insert in chunks of 100
-                if len(combinations_batch) >= 100:
-                    insert_response = (
-                        supabase.table("ticket_combinations")
-                        .insert(combinations_batch)
-                        .execute()
-                    )
-                    combinations_inserted += len(combinations_batch)
-                    combinations_batch = []
-            
-            # Insert remaining combinations
-            if combinations_batch:
+            # Batch insert in chunks of 100
+            all_combinations = combinations_batch_schema.to_db_list()
+            for i in range(0, len(all_combinations), 100):
+                chunk = all_combinations[i:i + 100]
                 insert_response = (
                     supabase.table("ticket_combinations")
-                    .insert(combinations_batch)
+                    .insert(chunk)
                     .execute()
                 )
-                combinations_inserted += len(combinations_batch)
+                combinations_inserted += len(chunk)
             
             logger.info(f"Inserted {combinations_inserted} combinations for ticket {inserted_ticket_id}")
         
@@ -211,6 +245,10 @@ def insert_ticket_to_supabase(
 async def extract_lottery_data(file: UploadFile = File(...), user_id: Optional[str] = None):
     """Extract lottery numbers from ticket image using OCR and save to Supabase"""
     try:
+        # Default to fixed user_id if not provided
+        if not user_id:
+            user_id = 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d'
+        
         if not file:
             raise HTTPException(status_code=400, detail="No file provided")
 
@@ -517,10 +555,91 @@ async def extract_lottery_data(file: UploadFile = File(...), user_id: Optional[s
             image_url=image_url,
         )
         
+        # If ticket was successfully inserted and draw date is in the past, evaluate immediately
+        evaluation_result = None
+        notification_sent = False
+        
+        if db_result.get("status") == "success" and draw_date:
+            try:
+                # Check if draw date is in the past (including today)
+                ticket_draw_date = date.fromisoformat(draw_date) if isinstance(draw_date, str) else draw_date
+                today = date.today()
+                
+                if ticket_draw_date <= today:
+                    logger.info(f"Draw date {ticket_draw_date} is in the past. Attempting immediate evaluation.")
+                    
+                    # Import services for evaluation
+                    from ..services.draw_results_manager import create_draw_results_manager
+                    from ..services.prize_matching import evaluate_ticket, get_prize_amount
+                    from ..services.notification_service import create_notification_service
+                    
+                    draw_manager = create_draw_results_manager()
+                    notification_service = create_notification_service()
+                    
+                    # Fetch draw results for this date
+                    draw_results = draw_manager.get_draw_results(
+                        game_type=detected_game_type,
+                        draw_date=draw_date,
+                        fetch_if_missing=True  # Try to fetch from web if not in database
+                    )
+                    
+                    if draw_results and draw_results.get("status") == "success":
+                        logger.info(f"Found draw results for {detected_game_type} on {draw_date}")
+                        
+                        # Prepare ticket data for evaluation
+                        ticket_id = db_result.get("ticket_id")
+                        ticket_data = {
+                            "game_type": detected_game_type,
+                            "numbers": numbers,
+                            "ticket_type": ticket_type,
+                        }
+                        
+                        # Evaluate the ticket
+                        eval_result = evaluate_ticket(ticket_data, draw_results)
+                        evaluation_result = eval_result
+                        
+                        # Determine status and prize tier
+                        prize_tier = eval_result.get("prize_tier", "No Prize")
+                        is_winner = eval_result.get("is_winner", False)
+                        status = "won" if is_winner else "lost"
+                        winning_amount = get_prize_amount(detected_game_type, prize_tier) if is_winner else 0.0
+                        
+                        # Update ticket in database with evaluation results
+                        supabase = get_supabase_client()
+                        update_data = {
+                            "status": status,
+                            "prize_tier": prize_tier,
+                            "winning_amount": winning_amount,
+                        }
+                        
+                        supabase.table("tickets").update(update_data).eq("id", ticket_id).execute()
+                        logger.info(f"Updated ticket {ticket_id}: status={status}, prize_tier={prize_tier}")
+                        
+                        # Send notification
+                        notification_sent = notification_service.notify_ticket_result(
+                            user_id=user_id,
+                            ticket_id=ticket_id,
+                            game_type=detected_game_type,
+                            draw_date=draw_date,
+                            draw_id=draw_id,
+                            is_winner=is_winner,
+                            prize_tier=prize_tier,
+                            prize_amount=int(winning_amount),
+                        )
+                        logger.info(f"Notification sent for ticket {ticket_id}: {notification_sent}")
+                    else:
+                        logger.info(f"No draw results found yet for {detected_game_type} on {draw_date}")
+            
+            except Exception as eval_error:
+                logger.error(f"Error during immediate evaluation: {str(eval_error)}", exc_info=True)
+                # Don't fail the entire request if evaluation fails
+        
         return {
             "status": "success",
             "extracted_data": extracted_data_dict,
             "database": db_result,
+            "evaluation": evaluation_result,
+            "notification_sent": notification_sent,
             "diagnostics": {
                 "total_vision_detections": len(results_with_boxes),
                 "full_ocr_text_preview": full_text[:300],
