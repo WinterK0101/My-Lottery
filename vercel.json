@@ -25,10 +25,5 @@
       "path": "/api/cron/check-toto",
       "schedule": "0 19 * * 0,3,6"
     }
-  ],
-  "env": {
-    "CRON_SECRET": "@cron-secret",
-    "SUPABASE_URL": "@supabase-url",
-    "SUPABASE_KEY": "@supabase-key"
-  }
+  ]
 }
