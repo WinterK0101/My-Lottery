@@ -44,6 +44,10 @@ my-lottery-489214-ad272c78acb1.json
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# documentation
+/docs/
+
 # python
 __pycache__
 *.py[cod]

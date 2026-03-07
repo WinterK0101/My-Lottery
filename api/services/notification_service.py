@@ -1,0 +1,267 @@
+"""
+Notification Service for Lottery Results
+Handles sending push notifications to users when their tickets are evaluated.
+"""
+
+import json
+import logging
+import os
+from typing import Optional, Dict, List
+from pywebpush import WebPushException, webpush
+
+try:
+    from .supabase import get_supabase_client
+except ImportError:
+    from services.supabase import get_supabase_client
+
+logger = logging.getLogger(__name__)
+
+
+class NotificationService:
+    """
+    Service for sending push notifications to users about lottery results.
+    """
+
+    def __init__(self):
+        """Initialize the notification service."""
+        self.supabase = get_supabase_client()
+        self.vapid_private_key = os.getenv("VAPID_PRIVATE_KEY")
+        self.vapid_public_key = os.getenv("NEXT_PUBLIC_VAPID_PUBLIC_KEY")
+
+    def get_user_subscription(self, user_id: str) -> Optional[Dict]:
+        """
+        Retrieve user's push notification subscription from database.
+        
+        Args:
+            user_id: User identifier
+            
+        Returns:
+            Subscription data dict or None if not found
+        """
+        try:
+            result = self.supabase.table("user_subscriptions").select("*").eq("user_id", user_id).eq("is_active", True).execute()
+            
+            if result.data and len(result.data) > 0:
+                return result.data[0].get("subscription_data")
+            return None
+        except Exception as e:
+            logger.error(f"Error fetching subscription for user {user_id}: {str(e)}")
+            return None
+
+    def save_user_subscription(self, user_id: str, subscription_data: Dict) -> bool:
+        """
+        Save or update user's push notification subscription.
+        
+        Args:
+            user_id: User identifier
+            subscription_data: Web Push subscription object
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # Upsert subscription (update if exists, insert if not)
+            result = self.supabase.table("user_subscriptions").upsert({
+                "user_id": user_id,
+                "subscription_data": subscription_data,
+                "is_active": True,
+                "updated_at": "NOW()"
+            }, on_conflict="user_id").execute()
+            
+            logger.info(f"Saved subscription for user {user_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Error saving subscription for user {user_id}: {str(e)}")
+            return False
+
+    def remove_user_subscription(self, user_id: str) -> bool:
+        """
+        Deactivate user's push notification subscription.
+        
+        Args:
+            user_id: User identifier
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            self.supabase.table("user_subscriptions").update({
+                "is_active": False,
+                "updated_at": "NOW()"
+            }).eq("user_id", user_id).execute()
+            
+            logger.info(f"Removed subscription for user {user_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Error removing subscription for user {user_id}: {str(e)}")
+            return False
+
+    def send_push_notification(
+        self,
+        subscription: Dict,
+        title: str,
+        body: str,
+        data: Optional[Dict] = None
+    ) -> bool:
+        """
+        Send a push notification to a specific subscription.
+        
+        Args:
+            subscription: Web Push subscription object
+            title: Notification title
+            body: Notification body text
+            data: Optional additional data to include
+            
+        Returns:
+            True if sent successfully, False otherwise
+        """
+        if not self.vapid_private_key or not self.vapid_public_key:
+            logger.error("VAPID keys not configured")
+            return False
+
+        try:
+            notification_payload = json.dumps({
+                "title": title,
+                "body": body,
+                "icon": "/web-app-manifest-192x192.png",
+                "badge": "/web-app-manifest-192x192.png",
+                "data": data or {}
+            })
+
+            webpush(
+                subscription_info=subscription,
+                data=notification_payload,
+                vapid_private_key=self.vapid_private_key,
+                vapid_claims={"sub": "mailto:notify@lottery-app.local"},
+            )
+            
+            logger.info(f"Push notification sent successfully: {title}")
+            return True
+            
+        except WebPushException as e:
+            logger.error(f"WebPush error: {e}")
+            # If subscription is expired, we should deactivate it
+            if e.response and e.response.status_code in [404, 410]:
+                logger.warning("Subscription expired or invalid")
+            return False
+        except Exception as e:
+            logger.error(f"Error sending push notification: {str(e)}")
+            return False
+
+    def notify_ticket_result(
+        self,
+        user_id: str,
+        ticket_id: str,
+        is_winner: bool,
+        prize_tier: str,
+        prize_amount: int,
+        game_type: str,
+        draw_date: str,
+        draw_id: Optional[str] = None
+    ) -> bool:
+        """
+        Send notification to user about their ticket evaluation result.
+        
+        Args:
+            user_id: User identifier
+            ticket_id: Ticket ID
+            is_winner: Whether the ticket won
+            prize_tier: Prize tier/category (e.g., "Group 1", "1st Prize", "No Prize")
+            prize_amount: Prize amount in SGD
+            game_type: Game type (4D or TOTO)
+            draw_date: Draw date
+            draw_id: Optional draw ID
+            
+        Returns:
+            True if notification sent successfully, False otherwise
+        """
+        # Get user's subscription
+        subscription = self.get_user_subscription(user_id)
+        if not subscription:
+            logger.info(f"No active subscription found for user {user_id}")
+            return False
+
+        # Compose notification message
+        if is_winner:
+            title = f"🎉 Congratulations! You Won!"
+            body = f"{game_type} Draw - {prize_tier}: SGD ${prize_amount:,}"
+        else:
+            title = f"📋 {game_type} Results Available"
+            body = f"Your ticket for {draw_date} did not win this time. Better luck next draw!"
+
+        # Additional data for the notification
+        notification_data = {
+            "ticket_id": ticket_id,
+            "is_winner": is_winner,
+            "prize_tier": prize_tier,
+            "prize_amount": prize_amount,
+            "game_type": game_type,
+            "draw_date": draw_date,
+            "draw_id": draw_id,
+            "url": f"/tickets/{ticket_id}"  # Link to ticket details page
+        }
+
+        # Send the notification
+        return self.send_push_notification(
+            subscription=subscription,
+            title=title,
+            body=body,
+            data=notification_data
+        )
+
+    def notify_batch_results(self, ticket_results: List[Dict]) -> Dict[str, int]:
+        """
+        Send notifications for a batch of evaluated tickets.
+        
+        Args:
+            ticket_results: List of ticket evaluation results, each containing:
+                - user_id
+                - ticket_id
+                - is_winner
+                - prize_tier
+                - prize_amount
+                - game_type
+                - draw_date
+                - draw_id (optional)
+        
+        Returns:
+            Summary dict with counts of successful/failed notifications
+        """
+        summary = {
+            "total": len(ticket_results),
+            "sent": 0,
+            "failed": 0,
+            "no_subscription": 0
+        }
+
+        for result in ticket_results:
+            user_id = result.get("user_id")
+            
+            # Skip if no user_id (anonymous tickets)
+            if not user_id:
+                summary["no_subscription"] += 1
+                continue
+
+            success = self.notify_ticket_result(
+                user_id=user_id,
+                ticket_id=result.get("ticket_id"),
+                is_winner=result.get("is_winner", False),
+                prize_tier=result.get("prize_tier", "No Prize"),
+                prize_amount=result.get("prize_amount", 0),
+                game_type=result.get("game_type"),
+                draw_date=result.get("draw_date"),
+                draw_id=result.get("draw_id")
+            )
+
+            if success:
+                summary["sent"] += 1
+            else:
+                summary["failed"] += 1
+
+        logger.info(f"Batch notification summary: {summary}")
+        return summary
+
+
+def create_notification_service() -> NotificationService:
+    """Factory function to create a NotificationService instance."""
+    return NotificationService()

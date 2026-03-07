@@ -3,6 +3,7 @@ import logging
 import re
 from io import BytesIO
 from typing import Optional
+import uuid
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from google.cloud import vision
@@ -30,9 +31,52 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
+def upload_image_to_supabase_storage(
+    image_bytes: bytes,
+    filename: str,
+) -> Optional[str]:
+    """
+    Upload image to Supabase storage and return public URL.
+    
+    Args:
+        image_bytes: Raw image bytes
+        filename: Filename for the uploaded image
+    
+    Returns:
+        Public URL of uploaded image, or None if upload fails
+    """
+    try:
+        supabase = get_supabase_client()
+        
+        # Generate unique filename to prevent collisions
+        unique_filename = f"{uuid.uuid4()}_{filename}"
+        
+        # Upload to 'ticket-images' bucket
+        bucket_name = "ticket-images"
+        storage_path = f"uploads/{unique_filename}"
+        
+        # Upload file
+        response = supabase.storage.from_(bucket_name).upload(
+            path=storage_path,
+            file=image_bytes,
+            file_options={"content-type": "image/jpeg"},
+        )
+        
+        # Get public URL
+        public_url = supabase.storage.from_(bucket_name).get_public_url(storage_path)
+        
+        logger.info(f"Image uploaded successfully: {public_url}")
+        return public_url
+        
+    except Exception as e:
+        logger.error(f"Failed to upload image to Supabase storage: {str(e)}")
+        return None
+
+
 def insert_ticket_to_supabase(
     extracted_data: dict,
     user_id: Optional[str] = None,
+    image_url: Optional[str] = None,
 ) -> dict:
     """
     Insert extracted ticket data and expanded combinations into Supabase.
@@ -40,6 +84,7 @@ def insert_ticket_to_supabase(
     Args:
         extracted_data: The extracted lottery data from OCR
         user_id: Optional user ID to associate with the ticket
+        image_url: Optional URL of uploaded image in Supabase storage
     
     Returns:
         Dict with ticket_id and status
@@ -50,7 +95,9 @@ def insert_ticket_to_supabase(
         game_type = extracted_data.get("game_type")
         ticket_type = extracted_data.get("ticket_type")
         draw_date = extracted_data.get("draw_date")
+        draw_id = extracted_data.get("draw_id")
         numbers = extracted_data.get("numbers", [])
+        ticket_serial_number = extracted_data.get("ticket_serial_number")
         expanded_combinations = extracted_data.get("expanded_combinations", [])
         confidence = extracted_data.get("confidence", 0.0)
         combinations_count = extracted_data.get("combinations_count", 0)
@@ -60,15 +107,41 @@ def insert_ticket_to_supabase(
             logger.warning("Cannot insert ticket: no numbers extracted")
             return {"status": "skipped", "reason": "no_numbers"}
         
+        # Check for duplicate ticket by serial number
+        if ticket_serial_number:
+            try:
+                existing_ticket = (
+                    supabase.table("tickets")
+                    .select("id, created_at, status, prize_tier")
+                    .eq("ticket_serial_number", ticket_serial_number)
+                    .execute()
+                )
+                
+                if existing_ticket.data and len(existing_ticket.data) > 0:
+                    existing = existing_ticket.data[0]
+                    logger.info(f"Duplicate ticket detected: {ticket_serial_number}")
+                    return {
+                        "status": "duplicate",
+                        "ticket_id": existing["id"],
+                        "message": f"This ticket was already uploaded on {existing['created_at']}",
+                        "existing_ticket": existing,
+                    }
+            except Exception as dup_check_error:
+                logger.warning(f"Duplicate check failed: {str(dup_check_error)}")
+                # Continue with insertion if duplicate check fails
+        
         # Step 1: Insert main ticket record
         ticket_data = {
             "user_id": user_id,
             "game_type": game_type,
             "ticket_type": ticket_type,
             "draw_date": draw_date,
+            "draw_id": draw_id,
+            "ticket_serial_number": ticket_serial_number,
             "selected_numbers": numbers,
             "combinations_count": combinations_count,
             "ocr_confidence": confidence,
+            "image_url": image_url,
             "metadata": {
                 "ocr_confidence": confidence,
                 "is_system_bet": "System" in (ticket_type or ""),
@@ -198,6 +271,21 @@ async def extract_lottery_data(file: UploadFile = File(...), user_id: Optional[s
             full_text = " ".join(text_strings)
         confidence = np.mean([float(text[2]) for text in results_with_boxes]) if results_with_boxes else 0.0
 
+        # Extract ticket serial number (format: 739462-6-6419873-005)
+        ticket_serial_number = None
+        serial_pattern = r"\b\d{5,7}-\d{1,2}-\d{6,8}-\d{3,4}\b"
+        serial_match = re.search(serial_pattern, full_text)
+        if serial_match:
+            ticket_serial_number = serial_match.group()
+            logger.info(f"Extracted ticket serial number: {ticket_serial_number}")
+        else:
+            # Try alternative patterns (numbers might be split by spaces in OCR)
+            compact_text = re.sub(r"\s+", "", full_text)
+            serial_match_compact = re.search(serial_pattern, compact_text)
+            if serial_match_compact:
+                ticket_serial_number = serial_match_compact.group()
+                logger.info(f"Extracted ticket serial number (compact): {ticket_serial_number}")
+
         # Robust game type detection (handles OCR variants like "4 D", "4-D", "40", split tokens)
         full_text_upper = full_text.upper()
         compact_text = re.sub(r"[^A-Z0-9]", "", full_text_upper)
@@ -284,6 +372,26 @@ async def extract_lottery_data(file: UploadFile = File(...), user_id: Optional[s
                 draw_date = datetime.now().strftime("%Y-%m-%d")
         else:
             draw_date = datetime.now().strftime("%Y-%m-%d")
+
+        # Extract draw ID (format: 4162/26 where draw_id = 4162)
+        # Usually appears right after draw date on the ticket
+        draw_id = None
+        draw_id_match = re.search(r"\b(\d{4})/(\d{2})\b", full_text)
+        if draw_id_match:
+            draw_id = draw_id_match.group(1)  # Extract just the first part (4162)
+            logger.info(f"Extracted draw ID: {draw_id}")
+        else:
+            # Try alternative pattern without slash (just 4-digit number near date)
+            # Look for 4-digit numbers that aren't part of a date
+            lines = full_text.split("\n")
+            for line in lines:
+                if date_match and date_match.group() in line:
+                    # Found the line with the date, look for draw ID
+                    potential_ids = re.findall(r"(?<!\d)\d{4}(?!/)", line)
+                    if potential_ids:
+                        draw_id = potential_ids[0]
+                        logger.info(f"Extracted draw ID (alternative): {draw_id}")
+                        break
 
         # Extract lottery numbers from full OCR text
         # Vision API is accurate enough; no need for complex ROI/alignment filtering
@@ -386,7 +494,9 @@ async def extract_lottery_data(file: UploadFile = File(...), user_id: Optional[s
             "game_type": detected_game_type,
             "ticket_type": ticket_type,
             "draw_date": draw_date,
+            "draw_id": draw_id,
             "numbers": numbers,
+            "ticket_serial_number": ticket_serial_number,
             "expected_number_count": expected_number_count,
             "confidence": round(confidence, 2),
             "count": len(numbers),
@@ -394,8 +504,18 @@ async def extract_lottery_data(file: UploadFile = File(...), user_id: Optional[s
             "combinations_count": len(expanded_combinations) if expanded_combinations else None,
         }
         
+        # Upload image to Supabase storage
+        image_url = upload_image_to_supabase_storage(
+            image_bytes=contents,
+            filename=file.filename or "ticket.jpg",
+        )
+        
         # Attempt to insert into Supabase
-        db_result = insert_ticket_to_supabase(extracted_data_dict, user_id=user_id)
+        db_result = insert_ticket_to_supabase(
+            extracted_data_dict,
+            user_id=user_id,
+            image_url=image_url,
+        )
         
         return {
             "status": "success",
