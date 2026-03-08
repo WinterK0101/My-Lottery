@@ -42,6 +42,289 @@ except ImportError:
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
+_TOTO_GROUP_LINE_PATTERN = re.compile(
+    r"^\s*([A-E])(?:\s*[\.\):\-]\s*|\s+)(.*)$",
+    re.IGNORECASE,
+)
+_TOTO_GROUP_COMPACT_PATTERN = re.compile(r"^\s*([A-E])(?=\d)(.*)$", re.IGNORECASE)
+
+
+def _extract_valid_toto_numbers(text: str) -> list[int]:
+    """
+    Extract valid TOTO numbers (1-49) from any OCR text segment.
+    Handles both space-separated and concatenated digits (e.g., "1531" → [15, 31]).
+    """
+    values: list[int] = []
+    
+    # First, try standard word-boundary matches (space-separated)
+    for token in re.findall(r"\b\d{1,2}\b", text):
+        value = int(token)
+        if 1 <= value <= 49:
+            values.append(value)
+    
+    # Second, handle concatenated 4-digit sequences (e.g., "1531" → [15, 31])
+    for match in re.finditer(r"\d{4}", text):
+        potential_fourdigit = match.group()
+        # Try splitting as two 2-digit numbers
+        first_two = int(potential_fourdigit[:2])
+        second_two = int(potential_fourdigit[2:])
+        if 1 <= first_two <= 49 and 1 <= second_two <= 49:
+            # Only add if both resulting numbers are valid and not already present
+            if first_two not in values:
+                values.append(first_two)
+            if second_two not in values:
+                values.append(second_two)
+    
+    return values
+
+
+def _dedupe_preserve_order(values: list[int]) -> list[int]:
+    """Remove duplicates while preserving first-seen order."""
+    seen: set[int] = set()
+    deduped: list[int] = []
+    for value in values:
+        if value not in seen:
+            seen.add(value)
+            deduped.append(value)
+    return deduped
+
+
+def _match_toto_group_line(line: str) -> Optional[re.Match]:
+    """Match TOTO group labels like A., B), C 12 ... including compact OCR variants."""
+    marker_match = _TOTO_GROUP_LINE_PATTERN.match(line)
+    if marker_match:
+        return marker_match
+    return _TOTO_GROUP_COMPACT_PATTERN.match(line)
+
+
+def _detect_mangled_toto_group_label(text: str) -> Optional[str]:
+    """Detect OCR-mangled group markers such as 'DSING', 'DSINGAPORE', or 'DSING PORE'."""
+    normalized = re.sub(r"[^A-Z0-9]", "", text.upper())
+    if len(normalized) < 2:
+        return None
+
+    label = normalized[0]
+    if label not in "ABCDE":
+        return None
+
+    tail = normalized[1:]
+    if tail.startswith(("SING", "SIN", "5ING", "S1NG", "ING")):
+        return label
+
+    return None
+
+
+def _extract_toto_grouped_combinations_with_bbox(
+    annotation_data: list[tuple], 
+    target_count: int
+) -> list[list[int]]:
+    """
+    Extract grouped TOTO selections using bounding box coordinates.
+    Handles two-column ticket layouts where groups span multiple rows.
+    
+    annotation_data format: [(annotation, bbox, text, confidence, avg_y, avg_x), ...]
+    """
+    if target_count <= 0:
+        return []
+    
+    # Filter to section between ORDINARY and PRICE only
+    ordinary_idx = None
+    price_idx = None
+    for idx, (_, _, text, _, _, _) in enumerate(annotation_data):
+        if "ORDINARY" in text.upper() and ordinary_idx is None:
+            ordinary_idx = idx
+        if "PRICE" in text.upper() and price_idx is None:
+            price_idx = idx
+            break
+    
+    if ordinary_idx is not None and price_idx is not None:
+        section_data = annotation_data[ordinary_idx:price_idx]
+    else:
+        section_data = annotation_data
+    
+    # Group annotations by Y-bucket (rows) while preserving X order within each row
+    y_bucket_tolerance = 15
+    rows = []  # List of lists: each inner list is [(text, avg_x, avg_y), ...]
+    current_row = []
+    current_y_bucket = None
+    
+    for _, _, text, _, avg_y, avg_x in section_data:
+        y_bucket = round(avg_y / y_bucket_tolerance)
+        
+        if current_y_bucket is None:
+            current_y_bucket = y_bucket
+        
+        if y_bucket != current_y_bucket:
+            if current_row:
+                # Sort by X within row (left-to-right)
+                current_row.sort(key=lambda item: item[1])
+                rows.append(current_row)
+            current_row = [(text, avg_x, avg_y)]
+            current_y_bucket = y_bucket
+        else:
+            current_row.append((text, avg_x, avg_y))
+    
+    # Flush last row
+    if current_row:
+        current_row.sort(key=lambda item: item[1])
+        rows.append(current_row)
+    
+    # Now extract groups by looking for markers (A-E) and collecting numbers until next marker.
+    # Store spatial coordinates for each extracted number so we can re-order reliably even
+    # when perspective/curvature causes OCR row order inversions.
+    groups = {}  # {label: [(number, avg_x, avg_y, token_seq, number_seq), ...]}
+    current_group = None
+    token_seq = 0
+    
+    for row in rows:
+        for text, avg_x, avg_y in row:
+            text_stripped = text.strip()
+            token_seq += 1
+            
+            # Check if text is exactly a single letter A-E
+            if len(text_stripped) == 1 and text_stripped.upper() in ['A', 'B', 'C', 'D', 'E']:
+                current_group = text_stripped.upper()
+                if current_group not in groups:
+                    groups[current_group] = []
+                continue
+            
+            # Check for group marker (A., B., C., D., E. or variations)
+            marker_match = re.match(r"^([A-E])[\.\-\)\s]", text_stripped, re.IGNORECASE)
+            if marker_match:
+                current_group = marker_match.group(1).upper()
+                if current_group not in groups:
+                    groups[current_group] = []
+                # Extract numbers from marker text itself (if any)
+                numbers = _extract_valid_toto_numbers(text)
+                for number_idx, number in enumerate(numbers):
+                    groups[current_group].append((number, avg_x, avg_y, token_seq, number_idx))
+                continue
+            
+            # Check for mangled markers like "DSING", "DSINGAPORE", "DSING PORE"
+            mangled_label = _detect_mangled_toto_group_label(text_stripped)
+            if mangled_label:
+                current_group = mangled_label
+                if current_group not in groups:
+                    groups[current_group] = []
+                continue
+            
+            # If we have a current group, collect numbers
+            if current_group:
+                numbers = _extract_valid_toto_numbers(text)
+                for number_idx, number in enumerate(numbers):
+                    groups[current_group].append((number, avg_x, avg_y, token_seq, number_idx))
+    
+    # Build result in order A -> B -> C -> D -> E
+    grouped_combinations = []
+    for label in ['A', 'B', 'C', 'D', 'E']:
+        if label in groups:
+            # Primary sort by X (left-to-right) makes ordering robust on perspective-skewed rows.
+            # Secondary sort by Y and token order keeps stable ordering for ties.
+            spatial_numbers = sorted(
+                groups[label],
+                key=lambda item: (item[1], item[2], item[3], item[4]),
+            )
+            numbers = [item[0] for item in spatial_numbers]
+            # Deduplicate within group, preserving order
+            deduped = _dedupe_preserve_order(numbers)
+            # Take exactly target_count numbers
+            if len(deduped) >= target_count:
+                grouped_combinations.append(deduped[:target_count])
+            else:
+                # If we don't have enough, still add what we have
+                grouped_combinations.append(deduped)
+    
+    return grouped_combinations
+
+
+def _extract_toto_grouped_combinations(full_text: str, target_count: int) -> list[list[int]]:
+    """
+    Extract grouped TOTO selections from OCR text where each entry is prefixed by A-E.
+
+    Uses true sequential allocation: finds ALL markers first, then creates a single flat
+    stream of ALL numbers (NO deduplication across stream - duplicates are valid), then 
+    allocates exactly `target_count` numbers to each marker in sequence.
+    Handles OCR corruption where numbers are scrambled.
+    
+    NOTE: This is a fallback. Prefer _extract_toto_grouped_combinations_with_bbox when
+    bounding box data is available.
+    """
+    if target_count <= 0:
+        return []
+
+    # Extract section between "ORDINARY" and "PRICE" to avoid noise
+    section_text = full_text
+    ordinary_match = re.search(r"ORDINARY\s*\n", section_text, re.IGNORECASE)
+    price_match = re.search(r"PRICE\s*:", section_text, re.IGNORECASE)
+    
+    if ordinary_match and price_match:
+        start = ordinary_match.end()
+        end = price_match.start()
+        section_text = section_text[start:end]
+
+    lines = section_text.splitlines()
+    markers_found: list[str] = []  # Just the labels (A, B, C, D, E)
+    all_numbers_flat: list[int] = []  # Single flat stream - duplicates OK!
+    
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            continue
+        
+        # Check for A-E marker
+        marker_match = _match_toto_group_line(line)
+        if marker_match:
+            markers_found.append(marker_match.group(1).upper())
+            # Extract numbers from marker line and add to flat stream
+            line_numbers = _extract_valid_toto_numbers(marker_match.group(2))
+            all_numbers_flat.extend(line_numbers)
+            continue
+        
+        # Check for mangled marker (e.g., "DSINGAPORE")
+        if len(line) >= 1 and line[0].upper() in "ABCDE" and len(line) > 1 and line[1] not in " \t.):- ":
+            if line[0].upper() >= "A" and line[0].upper() <= "E":
+                markers_found.append(line[0].upper())
+                line_numbers = _extract_valid_toto_numbers(line)
+                all_numbers_flat.extend(line_numbers)
+                continue
+        
+        # Regular line with numbers - add to flat stream
+        line_numbers = _extract_valid_toto_numbers(line)
+        all_numbers_flat.extend(line_numbers)
+    
+    # DO NOT dedupe the flat stream - duplicates across groups are valid!
+    # Only dedupe within each allocated group
+    
+    # Allocate exactly target_count numbers to each marker sequentially
+    grouped_combinations: list[list[int]] = []
+    number_index = 0
+    
+    for label in markers_found:
+        # Take next target_count numbers from the flat stream
+        group_numbers = all_numbers_flat[number_index:number_index + target_count]
+        # Dedupe within this group only (preserve order)
+        group_numbers_deduped = _dedupe_preserve_order(group_numbers)
+        if len(group_numbers_deduped) >= 1:
+            grouped_combinations.append(group_numbers_deduped)
+        number_index += target_count  # Always advance by target_count, not actual taken
+    
+    return grouped_combinations
+
+
+def _extract_toto_numbers_fallback(full_text: str, target_count: int) -> list[int]:
+    """Fallback extraction when grouped labels are missing or unreadable."""
+    lines = full_text.splitlines()
+    first_marker_index = -1
+
+    for idx, line in enumerate(lines):
+        if _match_toto_group_line(line):
+            first_marker_index = idx
+            break
+
+    source_text = "\n".join(lines[first_marker_index:]) if first_marker_index >= 0 else full_text
+    candidates = _extract_valid_toto_numbers(source_text)
+    return _dedupe_preserve_order(candidates)[:target_count]
+
 
 def upload_image_to_supabase_storage(
     image_bytes: bytes,
@@ -280,12 +563,14 @@ async def extract_lottery_data(file: UploadFile = File(...), user_id: Optional[s
             # Convert Vision API response to easyocr-like format
             results_with_boxes = []
             annotations = response.text_annotations
-            full_text = annotations[0].description if annotations else ""
+            full_text_original = annotations[0].description if annotations else ""
 
             if not annotations:
                 results_with_boxes = []
             else:
                 # Skip the first annotation (it's the full text)
+                # Build list of (annotation, bbox, text, confidence, y_coord, x_coord)
+                annotation_data = []
                 for annotation in annotations[1:]:
                     vertices = annotation.bounding_poly.vertices
                     # Convert vertices to list of [x, y] coordinates
@@ -298,7 +583,45 @@ async def extract_lottery_data(file: UploadFile = File(...), user_id: Optional[s
                         or getattr(annotation, "score", 0.0)
                         or 0.95
                     )
+                    # Calculate average Y coordinate (vertical position) and X coordinate (horizontal position)
+                    avg_y = sum(v[1] for v in bbox) / len(bbox)
+                    avg_x = sum(v[0] for v in bbox) / len(bbox)
+                    annotation_data.append((annotation, bbox, text, confidence, avg_y, avg_x))
+                
+                # Sort by Y coordinate (top-to-bottom) then X coordinate (left-to-right)
+                # Use tolerance of 15 pixels for Y to handle same-line elements
+                annotation_data.sort(key=lambda item: (round(item[4] / 15), item[5]))
+                
+                # Build results_with_boxes in sorted order
+                for _, bbox, text, confidence, _, _ in annotation_data:
                     results_with_boxes.append([bbox, text, confidence])
+                
+                # Reconstruct full_text from spatially sorted annotations with proper line breaks
+                # Group by Y-bucket (same bucket = same line)
+                full_text_lines = []
+                current_line = []
+                current_y_bucket = None
+                
+                for _, _, text, _, avg_y, _ in annotation_data:
+                    y_bucket = round(avg_y / 15)
+                    if current_y_bucket is None:
+                        current_y_bucket = y_bucket
+                    
+                    if y_bucket != current_y_bucket:
+                        # New line - flush current line
+                        if current_line:
+                            full_text_lines.append(" ".join(current_line))
+                        current_line = [text]
+                        current_y_bucket = y_bucket
+                    else:
+                        # Same line
+                        current_line.append(text)
+                
+                # Flush last line
+                if current_line:
+                    full_text_lines.append(" ".join(current_line))
+                
+                full_text = "\n".join(full_text_lines)
         except Exception as e:
             logger.error(f"OCR error: {str(e)}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"OCR processing failed: {str(e)}")
@@ -434,41 +757,22 @@ async def extract_lottery_data(file: UploadFile = File(...), user_id: Optional[s
         # Extract lottery numbers from full OCR text
         # Vision API is accurate enough; no need for complex ROI/alignment filtering
 
+        grouped_toto_combinations = None
+
         # Filter for valid lottery numbers based on game type
         if detected_game_type == "TOTO":
-            # TOTO: Extract from group marker lines (A-E) in order
             target_count = expected_number_count if expected_number_count is not None else 6
 
-            # Find the first group marker line (A through E for multiple bet groups)
-            first_marker_index = -1
-            lines = full_text.split("\n")
-            for i, line in enumerate(lines):
-                if re.search(r"^[A-E]\.", line) or re.search(r"^\s*[A-E]\.?\s+\d", line):
-                    first_marker_index = i
-                    break
-
-            # Extract numbers from first marker onwards, including continuation lines
-            candidates = []
-            if first_marker_index >= 0:
-                # Collect all numbers from marker line onwards until we have enough
-                remaining_text = "\n".join(lines[first_marker_index:])
-                all_numbers = re.findall(r"\b\d{1,2}\b", remaining_text)
-                for num_str in all_numbers:
-                    num = int(num_str)
-                    if 1 <= num <= 49:
-                        candidates.append(num)
-                        if len(candidates) >= target_count:
-                            break
-
-            # Remove duplicates while preserving order
-            seen = set()
-            numbers = []
-            for num in candidates:
-                if num not in seen and num != 0:
-                    seen.add(num)
-                    numbers.append(num)
-
-            numbers = numbers[:target_count]
+            # Use bounding box-aware extraction if annotation_data is available
+            if 'annotation_data' in locals() and annotation_data:
+                grouped_toto_combinations = _extract_toto_grouped_combinations_with_bbox(annotation_data, target_count)
+            else:
+                grouped_toto_combinations = _extract_toto_grouped_combinations(full_text, target_count)
+            
+            if grouped_toto_combinations:
+                numbers = grouped_toto_combinations[0]
+            else:
+                numbers = _extract_toto_numbers_fallback(full_text, target_count)
         elif detected_game_type == "4D":
             # 4D: Extract first 4-digit number from full_text
             four_digit_matches = re.findall(r"\b\d{4}\b", full_text)
@@ -523,6 +827,11 @@ async def extract_lottery_data(file: UploadFile = File(...), user_id: Optional[s
                     if system_type:
                         expanded_combinations = expand_toto_combinations(numbers, system_type)
                         logger.info(f"System {system_type}: expanded to {len(expanded_combinations)} combinations")
+                    elif grouped_toto_combinations and len(grouped_toto_combinations) > 1:
+                        expanded_combinations = grouped_toto_combinations
+                        logger.info(
+                            f"Detected {len(grouped_toto_combinations)} grouped TOTO entries in one ticket"
+                        )
             except ValueError as e:
                 logger.warning(f"Combination expansion failed: {str(e)}")
                 # Continue without expanded combinations if validation fails
@@ -540,6 +849,7 @@ async def extract_lottery_data(file: UploadFile = File(...), user_id: Optional[s
             "count": len(numbers),
             "expanded_combinations": expanded_combinations,
             "combinations_count": len(expanded_combinations) if expanded_combinations else None,
+            "grouped_toto_combinations": grouped_toto_combinations,
         }
         
         # Upload image to Supabase storage
@@ -593,6 +903,9 @@ async def extract_lottery_data(file: UploadFile = File(...), user_id: Optional[s
                             "numbers": numbers,
                             "ticket_type": ticket_type,
                         }
+
+                        if expanded_combinations:
+                            ticket_data["expanded_combinations"] = expanded_combinations
                         
                         # Evaluate the ticket
                         eval_result = evaluate_ticket(ticket_data, draw_results)
