@@ -348,18 +348,7 @@ Capture screenshots and store them in `docs/screenshots/` with the suggested fil
 4. Wait for OCR and processing.
 5. See result
 
-See Screenshots:
-![upload](/docs/screenshots/upload-1.jpg)
-![upload](/docs/screenshots/upload-2.jpg)
-![upload](/docs/screenshots/upload-3.jpg)
-![upload](/docs/screenshots/upload-4.jpg)
-
-## 6.2 Flow B: Check Purchase History
-
-1. Navigate to `/purchase-history`
-2. Scroll down to see
-
-## 6.3 Flow C: Check Past Results
+## 6.2 Flow C: Check Past Results
 
 1. Navigate to `/past-result`.
 2. Select `4D` or `TOTO`.
@@ -367,12 +356,7 @@ See Screenshots:
 4. Click `Find Past Result`.
 5. Optionally click `Load Latest` for selected game.
 
-Screenshot placeholders:
-
-- `docs/screenshots/06-past-result-form.png`
-- `docs/screenshots/07-past-result-output.png`
-
-## 6.4 Flow D: View Purchase History Dashboard
+## 6.3 Flow D: View Purchase History Dashboard
 
 1. Navigate to `/purchase-history`.
 2. Verify summary cards:
@@ -388,24 +372,6 @@ Screenshot placeholders:
 - Sort By
 
 4. Expand TOTO ticket details to inspect combinations and matches.
-
-Screenshot placeholders:
-
-- `docs/screenshots/08-history-summary.png`
-- `docs/screenshots/09-history-filters.png`
-- `docs/screenshots/10-toto-expanded-details.png`
-
-## 6.5 Flow E: Enable Notifications
-
-1. Open Home page and upload a ticket.
-2. When prompted, allow browser notification permission.
-3. Confirm status indicates notification setup/subscription.
-4. Verify a push notification arrives after ticket evaluation.
-
-Screenshot placeholders:
-
-- `docs/screenshots/11-notification-permission.png`
-- `docs/screenshots/12-notification-received.png`
 
 ## 7. Feature Testing Guide
 
