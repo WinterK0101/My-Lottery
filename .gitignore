@@ -46,7 +46,7 @@ my-lottery-489214-ad272c78acb1.json
 next-env.d.ts
 
 # documentation
-/docs/
+#/docs/
 
 # python
 __pycache__
