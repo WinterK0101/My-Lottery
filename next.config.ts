@@ -2,6 +2,11 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   async rewrites() {
+    const isVercelProduction = process.env.VERCEL === '1';
+    if (isVercelProduction) {
+      return [];
+    }
+
     return [
       {
         // match all API routes and forward them to the FastAPI backend

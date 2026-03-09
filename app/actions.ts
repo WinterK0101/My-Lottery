@@ -12,7 +12,7 @@ type SerializedPushSubscription = {
 const FASTAPI_URL =
   process.env.API_BASE_URL ||
   process.env.NEXT_PUBLIC_API_BASE_URL ||
-  'http://localhost:8000'
+  (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:8000')
  
 export async function subscribeUser(userId: string, sub: SerializedPushSubscription) {
   try {

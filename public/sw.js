@@ -1,9 +1,90 @@
+const CACHE_NAME = 'my-lottery-cache-v1'
+const ASSETS_TO_CACHE = [
+  '/',
+  '/manifest.webmanifest',
+  '/web-app-manifest-192x192.png',
+  '/web-app-manifest-512x512.png',
+]
+
 self.addEventListener('install', function (event) {
-  event.waitUntil(self.skipWaiting())
+  event.waitUntil(
+    caches
+      .open(CACHE_NAME)
+      .then((cache) => cache.addAll(ASSETS_TO_CACHE))
+      .then(() => self.skipWaiting()),
+  )
 })
 
 self.addEventListener('activate', function (event) {
-  event.waitUntil(self.clients.claim())
+  event.waitUntil(
+    (async () => {
+      const cacheNames = await caches.keys()
+      await Promise.all(
+        cacheNames
+          .filter((name) => name !== CACHE_NAME)
+          .map((name) => caches.delete(name)),
+      )
+
+      await self.clients.claim()
+    })(),
+  )
+})
+
+self.addEventListener('fetch', function (event) {
+  if (event.request.method !== 'GET') {
+    return
+  }
+
+  const url = new URL(event.request.url)
+  const isSameOrigin = url.origin === self.location.origin
+  const isNavigation = event.request.mode === 'navigate'
+
+  // Keep API and non-GET requests network-first to avoid caching dynamic responses.
+  if (!isSameOrigin || url.pathname.startsWith('/api/')) {
+    return
+  }
+
+  if (isNavigation) {
+    event.respondWith(
+      fetch(event.request)
+        .then((networkResponse) => {
+          const responseClone = networkResponse.clone()
+          void caches
+            .open(CACHE_NAME)
+            .then((cache) => cache.put('/', responseClone))
+          return networkResponse
+        })
+        .catch(async () => {
+          const cachedPage = await caches.match(event.request)
+          if (cachedPage) return cachedPage
+          return caches.match('/')
+        }),
+    )
+    return
+  }
+
+  event.respondWith(
+    caches.match(event.request).then((cachedResponse) => {
+      if (cachedResponse) {
+        return cachedResponse
+      }
+
+      return fetch(event.request)
+        .then((networkResponse) => {
+          if (!networkResponse || networkResponse.status !== 200) {
+            return networkResponse
+          }
+
+          const responseClone = networkResponse.clone()
+          void caches
+            .open(CACHE_NAME)
+            .then((cache) => cache.put(event.request, responseClone))
+
+          return networkResponse
+        })
+        .catch(() => caches.match('/'))
+    }),
+  )
 })
 
 self.addEventListener('push', function (event) {

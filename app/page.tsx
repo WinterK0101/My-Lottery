@@ -41,8 +41,24 @@ export default function TicketUpload() {
   }, []);
 
   const getApiBaseUrl = () => {
-    if (process.env.NEXT_PUBLIC_API_BASE_URL) return process.env.NEXT_PUBLIC_API_BASE_URL;
-    if (typeof window !== 'undefined') return `${window.location.protocol}//${window.location.hostname}:8000`;
+    const configuredBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL?.trim();
+    if (configuredBaseUrl) return configuredBaseUrl.replace(/\/$/, '');
+
+    if (typeof window !== 'undefined') {
+      const { hostname, origin } = window.location;
+      const isPrivate172 = /^172\.(1[6-9]|2\d|3[0-1])\./.test(hostname);
+      const isLocalHost =
+        hostname === 'localhost' ||
+        hostname === '127.0.0.1' ||
+        hostname.startsWith('192.168.') ||
+        hostname.startsWith('10.') ||
+        isPrivate172 ||
+        hostname.endsWith('.local');
+
+      if (isLocalHost) return `http://${hostname}:8000`;
+      return origin;
+    }
+
     return 'http://localhost:8000';
   };
 
