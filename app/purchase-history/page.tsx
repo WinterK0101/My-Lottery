@@ -40,6 +40,7 @@ type TicketRecord = {
   results_lookup_error?: string;
   evaluation_error?: string;
   created_at?: string;
+  image_url?: string | null;
 };
 
 type HistorySummary = {
@@ -151,21 +152,6 @@ const parseJsonResponse = async (response: Response): Promise<unknown> => {
 };
 
 function TotoDetailPanel({ ticket }: { ticket: TicketRecord }) {
-  const comboAnalysis =
-    ticket.combination_analysis && ticket.combination_analysis.length > 0
-      ? ticket.combination_analysis
-      : (ticket.expanded_combinations || []).map((numbers, index) => ({
-          combination_index: index,
-          numbers,
-          matched_numbers: [],
-          matched_count: 0,
-          has_additional: false,
-          tier: 'No Prize',
-          is_winning: false,
-        }));
-
-  const winningIndexSet = new Set(ticket.winning_combination_indexes || []);
-
   const drawResult = ticket.draw_result || null;
   const winningNumbersRaw = drawResult ? drawResult['winning_numbers'] : undefined;
   const additionalRaw = drawResult ? drawResult['additional_number'] : undefined;
@@ -188,142 +174,204 @@ function TotoDetailPanel({ ticket }: { ticket: TicketRecord }) {
     }
   }
 
+  const comboAnalysis =
+    ticket.combination_analysis && ticket.combination_analysis.length > 0
+      ? ticket.combination_analysis
+      : (ticket.expanded_combinations || []).map((numbers, index) => ({
+          combination_index: index,
+          numbers,
+          matched_numbers: [],
+          matched_count: 0,
+          has_additional: false,
+          tier: 'No Prize',
+          is_winning: false,
+        }));
+
+  const winningIndexSet = new Set(ticket.winning_combination_indexes || []);
+
   return (
-    <div className="rounded-lg border border-blue-200 bg-gradient-to-r from-blue-50 to-indigo-50 p-4 md:p-5">
-      <div className="grid gap-3 md:grid-cols-2">
-        <div className="rounded-lg border border-blue-200 bg-white p-3">
-          <p className="text-xs font-semibold uppercase tracking-wide text-blue-700">OCR Snapshot</p>
-          <p className="mt-2 text-sm text-gray-900">Serial: {ticket.ticket_serial_number || 'N/A'}</p>
-          <p className="text-sm text-gray-900">
-            OCR Confidence:{' '}
-            {typeof ticket.ocr_confidence === 'number' ? `${Math.round(ticket.ocr_confidence * 100)}%` : 'N/A'}
+    <div className="w-full p-6 bg-white rounded-lg border-2 border-blue-200">
+      <h2 className="font-bold text-gray-900 text-lg mb-4">✓ Ticket Details</h2>
+      
+      {/* Ticket Image Preview */}
+      {ticket.image_url && (
+        <div className="relative w-full border-4 border-dashed border-blue-300 rounded-xl overflow-hidden bg-gray-100 shadow-inner mb-4">
+          <img 
+            src={ticket.image_url} 
+            alt="Ticket Image" 
+            className="w-full h-auto block"
+          />
+        </div>
+      )}
+      
+      <div className="space-y-2">
+        <p className="text-gray-900">
+          <span className="font-semibold text-gray-950">Game:</span> {ticket.game_type}
+        </p>
+        <p className="text-gray-900">
+          <span className="font-semibold text-gray-950">Ticket Type:</span> {ticket.ticket_type || 'N/A'}
+        </p>
+        <p className="text-gray-900">
+          <span className="font-semibold text-gray-950">Purchase Date:</span>{' '}
+          {ticket.created_at ? formatDrawDate(ticket.created_at) : 'N/A'}
+        </p>
+        <p className="text-gray-900">
+          <span className="font-semibold text-gray-950">Draw Date:</span> {formatDrawDate(ticket.draw_date)}
+        </p>
+        {ticket.draw_id && (
+          <p className="text-gray-900">
+            <span className="font-semibold text-gray-950">Draw ID:</span> {ticket.draw_id}
           </p>
-          <p className="text-sm text-gray-900">Ticket Type: {ticket.ticket_type || 'Unknown'}</p>
+        )}
+        {ticket.ticket_serial_number && (
+          <p className="text-gray-900">
+            <span className="font-semibold text-gray-950">Ticket Serial:</span> {ticket.ticket_serial_number}
+          </p>
+        )}
+
+        <div className="mt-4 p-3 bg-white rounded border border-green-200">
+          <span className="font-semibold text-gray-950 block mb-2">Detected Numbers:</span>
           {detectedTicketGroups.length > 0 ? (
-            <div className="mt-3">
-              <p className="text-xs font-semibold uppercase tracking-wide text-blue-800">
-                Detected Ticket Group{detectedTicketGroups.length > 1 ? 's' : ''} ({detectedTicketGroups.length})
-              </p>
-              <div className="mt-2 space-y-4">
-                {detectedTicketGroups.map((group, groupIdx) => (
-                  <div
-                    key={`${ticket.id}-detected-group-${groupIdx}`}
-                    className="flex flex-wrap items-center gap-4"
-                    style={{ color: '#0f172a', opacity: 1 }}
-                  >
+            <div className="space-y-3">
+              {detectedTicketGroups.map((group, groupIdx) => (
+                <div key={`${ticket.id}-group-${groupIdx}`} className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs font-extrabold text-blue-950 min-w-[24px]">
+                    {String.fromCharCode(65 + groupIdx)}
+                  </span>
+                  {group.map((num, idx) => (
                     <span
-                      className="text-xs font-extrabold text-blue-950 min-w-[24px]"
-                      style={{ color: '#0f172a', fontWeight: 900 }}
+                      key={`${ticket.id}-group-${groupIdx}-num-${idx}`}
+                      className="px-3 py-1 bg-blue-100 text-blue-900 rounded-full font-mono font-bold"
                     >
-                      {String.fromCharCode(65 + groupIdx)}
+                      {num}
                     </span>
-                    {group.map((number, numberIdx) => (
-                      <span
-                        key={`${ticket.id}-detected-group-${groupIdx}-${numberIdx}`}
-                        className="px-3 py-1 bg-blue-100 text-blue-900 rounded-full font-mono font-bold"
-                      >
-                        {number}
-                      </span>
-                    ))}
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              ))}
             </div>
           ) : (
-            <div className="mt-3 flex flex-wrap gap-4">
-              {(ticket.selected_numbers || []).map((number, index) => (
-                <span
-                  key={`${ticket.id}-selected-${index}`}
-                  className="rounded-full bg-blue-100 px-3 py-1 text-xs font-semibold font-mono text-blue-900"
-                >
-                  {number}
+            <div className="flex flex-wrap gap-2">
+              {(ticket.selected_numbers || []).map((num: number, idx: number) => (
+                <span key={idx} className="px-3 py-1 bg-blue-100 text-blue-900 rounded-full font-mono font-bold">
+                  {num}
                 </span>
               ))}
             </div>
           )}
         </div>
 
-        <div className="rounded-lg border border-blue-200 bg-white p-3">
-          <p className="text-xs font-semibold uppercase tracking-wide text-blue-700">Official Draw Result</p>
-          <p className="mt-2 text-sm text-gray-900">
-            Winning Numbers:{' '}
-            {winningNumbers.length > 0 ? winningNumbers.join(', ') : 'Not available'}
-          </p>
-          <p className="text-sm text-gray-900">
-            Additional Number: {additionalNumber !== null ? additionalNumber : 'Not available'}
-          </p>
-          {ticket.winning_combinations && ticket.winning_combinations.length > 0 ? (
-            <p className="mt-2 text-sm font-medium text-emerald-700">
-              {ticket.winning_combinations.length} winning set(s) found on this ticket.
+        {/* Winning Status Section */}
+        <div className="mt-4 p-3 bg-white rounded border border-blue-200">
+          <span className="font-semibold text-gray-950 block mb-2">Result Status:</span>
+          
+          <div
+            className={`mt-3 rounded-lg border p-4 ${
+              ticket.status === 'won'
+                ? 'bg-green-50 border-green-300'
+                : ticket.status === 'lost'
+                ? 'bg-gray-50 border-gray-300'
+                : 'bg-blue-50 border-blue-300'
+            }`}
+          >
+            <p className="text-gray-800 font-semibold mb-2">
+              {ticket.status === 'won' ? '🎉 Winner!' : ticket.status === 'lost' ? '📊 No Prize' : 'ℹ️ Pending'}
             </p>
-          ) : (
-            <p className="mt-2 text-sm font-medium text-gray-900">No winning set found on expanded combinations.</p>
+            
+            {ticket.status === 'won' && (
+              <>
+                <p className="text-gray-700">
+                  <span className="font-semibold">Prize Tier:</span> {ticket.prize_tier || 'N/A'}
+                </p>
+                <p className="text-gray-700">
+                  <span className="font-semibold">Winning Amount:</span> {formatMoney(ticket.winning_amount)}
+                </p>
+                {ticket.winning_combinations && ticket.winning_combinations.length > 0 && (
+                  <p className="text-emerald-700 mt-2 text-sm">
+                    {ticket.winning_combinations.length} winning combination(s) found
+                  </p>
+                )}
+              </>
+            )}
+
+            {ticket.status === 'lost' && (
+              <p className="text-gray-700">
+                This ticket did not win any prizes for the draw on {formatDrawDate(ticket.draw_date)}.
+              </p>
+            )}
+
+            {ticket.status === 'pending' && (
+              <p className="text-gray-700">
+                Results will be available after the draw on {formatDrawDate(ticket.draw_date)}.
+              </p>
+            )}
+          </div>
+
+          {/* Draw Results (if available) */}
+          {drawResult && (winningNumbers.length > 0 || additionalNumber !== null) && (
+            <div className="mt-3 p-3 bg-blue-50 rounded border border-blue-200">
+              <p className="font-semibold text-gray-950 mb-2">Official Draw Results:</p>
+              <p className="text-sm text-gray-800">
+                <span className="font-semibold">Winning Numbers:</span>{' '}
+                {winningNumbers.length > 0 ? winningNumbers.join(', ') : 'Not available'}
+              </p>
+              {additionalNumber !== null && (
+                <p className="text-sm text-gray-800">
+                  <span className="font-semibold">Additional Number:</span> {additionalNumber}
+                </p>
+              )}
+            </div>
           )}
         </div>
-      </div>
 
-      <div className="mt-4 rounded-lg border border-blue-200 bg-white p-4">
-        <p className="text-xs font-semibold uppercase tracking-wide text-blue-700">
-          Expanded Combinations ({comboAnalysis.length})
-        </p>
-        <div className="mt-3 max-h-80 space-y-4 overflow-y-auto pr-1">
-          {comboAnalysis.map((combo) => {
-            const isWinning = combo.is_winning || winningIndexSet.has(combo.combination_index);
-            return (
-              <div
-                key={`${ticket.id}-combo-${combo.combination_index}`}
-                className={`rounded-lg border px-3 py-2 ${
-                  isWinning
-                    ? 'border-emerald-300 bg-emerald-50'
-                    : 'border-gray-200 bg-gray-50'
-                }`}
-              >
-                <div className="flex items-center justify-between gap-4">
-                  <p className="text-xs font-semibold text-gray-900">Set #{combo.combination_index + 1}</p>
-                  <span
-                    className={`rounded-full px-2 py-0.5 text-xs font-semibold ${
-                      isWinning
-                        ? 'bg-emerald-100 text-emerald-700'
-                        : 'bg-gray-200 text-gray-900'
+        {/* Expanded Combinations Section (Collapsible) */}
+        {comboAnalysis.length > 0 && (
+          <details className="mt-4 rounded-lg border border-gray-200 bg-white px-4 py-3">
+            <summary className="cursor-pointer text-sm font-semibold text-gray-900">
+              View All Combinations ({comboAnalysis.length} sets)
+            </summary>
+            <div className="mt-3 max-h-80 space-y-3 overflow-y-auto pr-1">
+              {comboAnalysis.map((combo) => {
+                const isWinning = combo.is_winning || winningIndexSet.has(combo.combination_index);
+                return (
+                  <div
+                    key={`${ticket.id}-combo-${combo.combination_index}`}
+                    className={`rounded-lg border px-3 py-2 ${
+                      isWinning ? 'border-emerald-300 bg-emerald-50' : 'border-gray-200 bg-gray-50'
                     }`}
                   >
-                    {isWinning ? combo.tier || 'Winning Set' : combo.tier || 'No Prize'}
-                  </span>
-                </div>
-
-                <div className="mt-2 flex flex-wrap gap-1.5">
-                  {combo.numbers.map((number, index) => {
-                    const isMatched = combo.matched_numbers.includes(number);
-                    return (
+                    <div className="flex items-center justify-between gap-4">
+                      <p className="text-xs font-semibold text-gray-900">Set #{combo.combination_index + 1}</p>
                       <span
-                        key={`${ticket.id}-combo-${combo.combination_index}-${index}`}
                         className={`rounded-full px-2 py-0.5 text-xs font-semibold ${
-                          isMatched
-                            ? 'bg-emerald-200 text-emerald-800'
-                            : 'bg-slate-200 text-slate-800'
+                          isWinning ? 'bg-emerald-100 text-emerald-700' : 'bg-gray-200 text-gray-900'
                         }`}
                       >
-                        {number}
+                        {isWinning ? combo.tier || 'Winning Set' : combo.tier || 'No Prize'}
                       </span>
-                    );
-                  })}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </div>
+                    </div>
 
-      {ticket.metadata && (
-        <details className="mt-4 rounded-lg border border-gray-200 bg-white px-4 py-3">
-          <summary className="cursor-pointer text-xs font-semibold uppercase tracking-wide text-gray-900">
-            Raw OCR Metadata
-          </summary>
-          <pre className="mt-2 overflow-x-auto text-xs text-gray-900">
-            {JSON.stringify(ticket.metadata, null, 2)}
-          </pre>
-        </details>
-      )}
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {combo.numbers.map((number, index) => {
+                        const isMatched = combo.matched_numbers.includes(number);
+                        return (
+                          <span
+                            key={`${ticket.id}-combo-${combo.combination_index}-${index}`}
+                            className={`rounded-full px-3 py-1 text-xs font-semibold font-mono ${
+                              isMatched ? 'bg-emerald-200 text-emerald-800' : 'bg-blue-100 text-blue-900'
+                            }`}
+                          >
+                            {number}
+                          </span>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </details>
+        )}
+      </div>
     </div>
   );
 }
