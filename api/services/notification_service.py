@@ -150,17 +150,20 @@ class NotificationService:
                 subscription_info=subscription,
                 data=notification_payload,
                 vapid_private_key=self.vapid_private_key,
-                vapid_claims={"sub": "mailto:notify@lottery-app.local"},
+                vapid_claims={
+                    "sub": "mailto:notify@lottery-app.local",
+                    "aud": subscription.get("endpoint", "").split("/wp/")[0] if "/wp/" in subscription.get("endpoint", "") else None
+                },
             )
             
             logger.info(f"Push notification sent successfully: {title}")
             return True
             
         except WebPushException as e:
-            logger.error(f"WebPush error: {e}")
-            # If subscription is expired, we should deactivate it
-            if e.response and e.response.status_code in [404, 410]:
-                logger.warning("Subscription expired or invalid")
+            logger.error(f"WebPush error: {e}, Response: {e.response.text if e.response else 'No response'}")
+            # If subscription is expired or invalid, we should deactivate it
+            if e.response and e.response.status_code in [400, 404, 410]:
+                logger.warning(f"Subscription invalid (status {e.response.status_code}), consider resubscribing")
             return False
         except Exception as e:
             logger.error(f"Error sending push notification: {str(e)}")
