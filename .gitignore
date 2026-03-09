@@ -55,3 +55,6 @@ __pycache__
 
 # TOTO documentation (generated)
 /toto-documentation
+
+# Supabase folder (contains local development files)
+/supabase
