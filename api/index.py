@@ -32,8 +32,7 @@ app.add_middleware(
     r"localhost|127\.0\.0\.1|"
     r"192\.168\.\d+\.\d+|"
     r"10\.\d+\.\d+\.\d+|"
-    r"172\.(1[6-9]|2\d|3[0-1])\.\d+\.\d+|"
-    r"[a-zA-Z0-9-]+\.ngrok-free\.app|"
+    r"172\.(1[6-9]|2\d|3[0-1])\.\d+\.\d+|"    r"[a-zA-Z0-9-]+\.vercel\.app|"    r"[a-zA-Z0-9-]+\.ngrok-free\.app|"
     r"[a-zA-Z0-9-]+\.ngrok-free\.dev|"
     r"[a-zA-Z0-9-]+\.ngrok\.io"
     r")(:\d+)?$",
