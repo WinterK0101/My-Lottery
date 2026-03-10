@@ -1,6 +1,6 @@
 # My Lottery User Manual
 
-Last updated: 2026-03-09  
+Last updated: 2026-03-10  
 Applies to: `my-lottery` (Next.js + FastAPI + Supabase + Google Vision)
 
 ## 1. Overview
@@ -12,13 +12,14 @@ My Lottery is a web and mobile-friendly Progressive Web App (PWA) for:
 - Auto-evaluating ticket outcomes (won/lost, prize tier, prize amount).
 - Viewing purchase history and ticket details.
 - Receiving push notifications when results are available.
+- Generating 4D and TOTO prediction suggestions from historical results.
 
 Core app areas:
 
 - Home Upload: `/`
 - Purchase History: `/purchase-history`
 - Past Result: `/past-result`
-- Prediction (placeholder): `/prediction`
+- Predictive Analysis: `/prediction`
 
 ## 2. System Requirements
 
@@ -336,9 +337,7 @@ iOS Safari:
 2. Tap Share > Add to Home Screen.
 3. Launch from home screen.
 
-## 6. Step-by-Step User Flows (With Screenshot Placeholders)
-
-Capture screenshots and store them in `docs/screenshots/` with the suggested filenames below.
+## 6. Step-by-Step User Flows
 
 ## 6.1 Flow A: Upload Ticket and Get Processing Status
 
@@ -348,7 +347,7 @@ Capture screenshots and store them in `docs/screenshots/` with the suggested fil
 4. Wait for OCR and processing.
 5. See result
 
-## 6.2 Flow C: Check Past Results
+## 6.2 Flow B: Check Past Results
 
 1. Navigate to `/past-result`.
 2. Select `4D` or `TOTO`.
@@ -356,7 +355,7 @@ Capture screenshots and store them in `docs/screenshots/` with the suggested fil
 4. Click `Find Past Result`.
 5. Optionally click `Load Latest` for selected game.
 
-## 6.3 Flow D: View Purchase History Dashboard
+## 6.3 Flow C: View Purchase History Dashboard
 
 1. Navigate to `/purchase-history`.
 2. Verify summary cards:
@@ -372,6 +371,25 @@ Capture screenshots and store them in `docs/screenshots/` with the suggested fil
 - Sort By
 
 4. Expand TOTO ticket details to inspect combinations and matches.
+
+## 6.4 Flow D: Generate Predictions
+
+1. Navigate to `/prediction`.
+2. Read the educational-use disclaimer.
+3. Click `I understand — continue`.
+4. Click `Generate Predictions`.
+5. Review the three model cards:
+
+- Frequency Analysis
+- Markov Chain
+- Gap / Due-Number Analysis
+
+6. Review each model's:
+
+- 4D predicted number
+- TOTO System 12 numbers
+- confidence meter
+- reasoning summary
 
 ## 7. Feature Testing Guide
 
@@ -398,6 +416,10 @@ Expected:
 - API `POST /api/extract` returns `status: success`.
 - Return success message to frontend
 - Ticket record inserted in Supabase.
+
+![upload](/docs/screenshots/upload-0.png)
+
+![upload](/docs/screenshots/upload-1.png)
 
 ## 7.3 Test Notifications
 
@@ -435,7 +457,33 @@ Expected:
 
 ![past result](/docs/screenshots/purchase-history.png)
 
-## 7.6 Test Cron-Protected Endpoints
+## 7.6 Test Prediction Endpoints
+
+Generate predictions using stored historical results:
+
+```bash
+curl -X POST http://localhost:8000/api/predictions/generate \
+   -H "Content-Type: application/json" \
+   -d '{"limit":50}'
+```
+
+Get model metadata:
+
+```bash
+curl http://localhost:8000/api/predictions/models-info
+```
+
+Expected:
+
+- `POST /api/predictions/generate` returns `disclaimer`, `models`, and `data_points_used`.
+- Each model includes `model_name`, `model_key`, `description`, `four_d`, `toto`, `methodology`, `assumptions`, `validation`, and `confidence_note`.
+- `GET /api/predictions/models-info` returns static metadata for the three implemented models.
+
+![prediction](/docs/screenshots/prediction-0.png)
+
+![prediction](/docs/screenshots/prediction-1.png)
+
+## 7.7 Test Cron-Protected Endpoints
 
 ```bash
 curl -X POST http://localhost:8000/api/cron/check-results \
@@ -532,24 +580,101 @@ This is normal before official draw result publication time. Retry later.
 
 ## 9. Known Issues and Limitations
 
-- Prediction module is a placeholder only (`/prediction`).
+- Prediction confidence values are heuristic indicators, not probabilities of winning.
+- Prediction endpoints depend on historical draw data in Supabase unless a `results` payload is supplied directly.
 - No native mobile app repository exists; mobile is delivered as web/PWA.
 - Notification click payload uses `/tickets/{ticket_id}` but this route is not present in current frontend pages.
 - Current default user strategy uses a fixed fallback `NEXT_PUBLIC_USER_ID`, which is not multi-user safe for production.
 - current cron expression is a random timing between 7PM to 7:59PM due to limitations of free plan
 - External scraping depends on Singapore Pools page structure; selector changes may break parsing until updated.
 
-## 10. Predictive Analysis Usage Guide (Placeholder)
+## 10. Prediction API Reference
 
-Status: Not implemented yet.
+Prediction is implemented in the backend under `/api/predictions`.
 
-Planned section content (to fill when feature is built):
+## 10.1 POST `/api/predictions/generate`
 
-- Model purpose and scope
-- Input data requirements
-- How to run predictions
-- How to interpret confidence/output
-- Responsible use disclaimer
+Use this endpoint to generate predictions from historical draw data.
+
+Request body:
+
+- `limit`: optional integer from `1` to `500`. Default is `50`. This controls how many draw-history rows are loaded per game type when using Supabase-backed history.
+- `results`: optional array of result rows. If provided, the endpoint uses this payload directly instead of querying Supabase.
+
+Example request using Supabase history:
+
+```bash
+curl -X POST http://localhost:8000/api/predictions/generate \
+   -H "Content-Type: application/json" \
+   -d '{"limit":50}'
+```
+
+Example request using an explicit results payload:
+
+```bash
+curl -X POST http://localhost:8000/api/predictions/generate \
+   -H "Content-Type: application/json" \
+   -d '{"results":[{"game_type":"4D","results":{"first_prize":"1234","second_prize":"5678","third_prize":"9012","starter":["1111"],"consolation":["2222"]}},{"game_type":"TOTO","results":{"winning_numbers":[1,2,3,4,5,6]}}]}'
+```
+
+Response fields:
+
+- `disclaimer`: responsible-use notice returned by the API.
+- `models`: array containing one response block per model.
+- `data_points_used`: total number of historical result rows used to generate the predictions.
+
+Each `models[]` entry contains:
+
+- `model_name`, `model_key`, `description`
+- `four_d.number`, `four_d.confidence`, `four_d.reasoning`
+- `toto.numbers`, `toto.primary`, `toto.supplementary`, `toto.confidence`, `toto.reasoning`
+- `methodology`, `assumptions`, `validation`, `confidence_note`
+
+Common error cases:
+
+- `400`: no past results were provided in a custom `results` payload.
+- `404`: no usable draw history is available in Supabase or no valid 4D/TOTO rows were found.
+- `500`: unexpected draw-history response format.
+
+## 10.2 GET `/api/predictions/models-info`
+
+Use this endpoint to retrieve static metadata about the implemented prediction models.
+
+Example request:
+
+```bash
+curl http://localhost:8000/api/predictions/models-info
+```
+
+Response returns a `models` array with:
+
+- `key`
+- `name`
+- `tagline`
+- `icon`
+
+## 10.3 Implemented Prediction Models
+
+Frequency Analysis:
+Uses hot-number frequency patterns from historical results. For 4D, it evaluates digit frequency by position. For TOTO, it ranks numbers by historical occurrence and builds a System 12 suggestion from the most frequent values.
+
+Markov Chain:
+Uses first-order transitions between consecutive draws. For 4D, each digit position is modeled separately. For TOTO, sorted ball positions are used to estimate the most likely next values from the previous draw.
+
+Gap / Due-Number Analysis:
+Tracks how long digits or numbers have been absent. For 4D, it looks for overdue digits by position. For TOTO, it ranks all 49 numbers by gap length and selects a weighted System 12 suggestion from the most overdue values.
+
+## 10.4 Interpreting Prediction Output
+
+- `four_d.number` is a 4-digit string.
+- `toto.numbers` contains 12 numbers intended as a System 12 entry.
+- `toto.primary` is the primary set of 6 numbers.
+- `toto.supplementary` is the secondary set of 6 numbers.
+- `confidence` is a relative model score from `0.0` to `1.0`. It is not a probability of winning.
+
+## 10.5 Responsible Use
+
+Prediction output is provided for educational and entertainment purposes only. Lottery draws are random events, and no model in this project should be treated as financial or gambling advice.
 
 ## 11. Data Privacy and Security Considerations
 
