@@ -1,4 +1,4 @@
-const CACHE_NAME = 'my-lottery-cache-v1'
+const CACHE_NAME = 'my-lottery-cache-v2'
 const ASSETS_TO_CACHE = [
   '/',
   '/manifest.webmanifest',
@@ -38,27 +38,16 @@ self.addEventListener('fetch', function (event) {
   const url = new URL(event.request.url)
   const isSameOrigin = url.origin === self.location.origin
   const isNavigation = event.request.mode === 'navigate'
+  const isNextAsset = url.pathname.startsWith('/_next/')
 
-  // Keep API and non-GET requests network-first to avoid caching dynamic responses.
-  if (!isSameOrigin || url.pathname.startsWith('/api/')) {
+  // Keep API and Next runtime chunks network-only to avoid stale SSR/JS hydration mismatches.
+  if (!isSameOrigin || url.pathname.startsWith('/api/') || isNextAsset) {
     return
   }
 
   if (isNavigation) {
     event.respondWith(
-      fetch(event.request)
-        .then((networkResponse) => {
-          const responseClone = networkResponse.clone()
-          void caches
-            .open(CACHE_NAME)
-            .then((cache) => cache.put('/', responseClone))
-          return networkResponse
-        })
-        .catch(async () => {
-          const cachedPage = await caches.match(event.request)
-          if (cachedPage) return cachedPage
-          return caches.match('/')
-        }),
+      fetch(event.request).catch(() => caches.match('/')),
     )
     return
   }
