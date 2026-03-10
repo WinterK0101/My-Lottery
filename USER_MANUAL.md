@@ -44,7 +44,6 @@ Create these:
 ## 2.2 Supported Browsers
 
 - Chrome (desktop/mobile)
-- Edge (notifications not working)
 - Safari (with platform-specific push support limits)
 
 Push notifications require browser support + granted permission + valid VAPID setup.
