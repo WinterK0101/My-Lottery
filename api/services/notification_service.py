@@ -8,6 +8,7 @@ import logging
 import os
 from datetime import datetime, timezone
 from typing import Optional, Dict, List
+from urllib.parse import urlsplit
 from pywebpush import WebPushException, webpush
 
 try:
@@ -30,6 +31,24 @@ class NotificationService:
         self.supabase = get_supabase_client()
         self.vapid_private_key = os.getenv("VAPID_PRIVATE_KEY")
         self.vapid_public_key = os.getenv("NEXT_PUBLIC_VAPID_PUBLIC_KEY")
+        self.vapid_subject = os.getenv("VAPID_SUBJECT", "mailto:support@example.com")
+
+    def _build_vapid_claims(self, subscription: Dict) -> Optional[Dict[str, str]]:
+        """Build RFC-compliant VAPID claims from the subscription endpoint origin."""
+        endpoint = subscription.get("endpoint")
+        if not isinstance(endpoint, str) or not endpoint.strip():
+            logger.error("Cannot send push notification: subscription endpoint is missing")
+            return None
+
+        parsed_endpoint = urlsplit(endpoint.strip())
+        if not parsed_endpoint.scheme or not parsed_endpoint.netloc:
+            logger.error("Cannot send push notification: invalid subscription endpoint '%s'", endpoint)
+            return None
+
+        return {
+            "sub": self.vapid_subject,
+            "aud": f"{parsed_endpoint.scheme}://{parsed_endpoint.netloc}",
+        }
 
     def get_user_subscription(self, user_id: str) -> Optional[Dict]:
         """
@@ -119,7 +138,8 @@ class NotificationService:
         subscription: Dict,
         title: str,
         body: str,
-        data: Optional[Dict] = None
+        data: Optional[Dict] = None,
+        user_id: Optional[str] = None,
     ) -> bool:
         """
         Send a push notification to a specific subscription.
@@ -129,12 +149,17 @@ class NotificationService:
             title: Notification title
             body: Notification body text
             data: Optional additional data to include
+            user_id: Optional user identifier for logging / cleanup
             
         Returns:
             True if sent successfully, False otherwise
         """
         if not self.vapid_private_key or not self.vapid_public_key:
             logger.error("VAPID keys not configured")
+            return False
+
+        vapid_claims = self._build_vapid_claims(subscription)
+        if not vapid_claims:
             return False
 
         try:
@@ -150,20 +175,37 @@ class NotificationService:
                 subscription_info=subscription,
                 data=notification_payload,
                 vapid_private_key=self.vapid_private_key,
-                vapid_claims={
-                    "sub": "mailto:notify@lottery-app.local",
-                    "aud": subscription.get("endpoint", "").split("/wp/")[0] if "/wp/" in subscription.get("endpoint", "") else None
-                },
+                vapid_claims=vapid_claims,
             )
             
-            logger.info(f"Push notification sent successfully: {title}")
+            logger.info("Push notification sent successfully: %s", title)
             return True
             
         except WebPushException as e:
-            logger.error(f"WebPush error: {e}, Response: {e.response.text if e.response else 'No response'}")
-            # If subscription is expired or invalid, we should deactivate it
-            if e.response and e.response.status_code in [400, 404, 410]:
-                logger.warning(f"Subscription invalid (status {e.response.status_code}), consider resubscribing")
+            status_code = e.response.status_code if e.response else None
+            response_body = ""
+            if e.response is not None:
+                try:
+                    response_body = e.response.text or ""
+                except Exception:
+                    response_body = ""
+
+            logger.error(
+                "WebPush error for user %s: status=%s, body=%s, error=%s",
+                user_id or "unknown",
+                status_code or "unknown",
+                (response_body[:500] if response_body else "<empty>"),
+                str(e),
+            )
+
+            if status_code in [404, 410] and user_id:
+                logger.warning("Deactivating expired push subscription for user %s", user_id)
+                self.remove_user_subscription(user_id)
+            elif status_code == 400:
+                logger.warning(
+                    "Push service returned 400 for user %s. Check VAPID claims/keys and re-subscribe the browser if keys were rotated.",
+                    user_id or "unknown",
+                )
             return False
         except Exception as e:
             logger.error(f"Error sending push notification: {str(e)}")
@@ -227,7 +269,8 @@ class NotificationService:
             subscription=subscription,
             title=title,
             body=body,
-            data=notification_data
+            data=notification_data,
+            user_id=user_id,
         )
 
     def notify_batch_results(self, ticket_results: List[Dict]) -> Dict[str, int]:

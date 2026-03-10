@@ -120,17 +120,7 @@ function TotoBall({ number, isSupplementary }: { number: number; isSupplementary
   );
 }
 
-function DocSection({ label, text }: { label: string; text: string }) {
-  return (
-    <div>
-      <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1">{label}</p>
-      <p className="text-sm text-gray-600 leading-relaxed whitespace-pre-line">{text}</p>
-    </div>
-  );
-}
-
 function ModelCard({ model }: { model: ModelPrediction }) {
-  const [tab, setTab] = useState<"results" | "docs">("results");
   const meta = MODEL_META[model.model_key] ?? MODEL_META.frequency;
 
   return (
@@ -144,82 +134,54 @@ function ModelCard({ model }: { model: ModelPrediction }) {
             <p className="text-xs text-gray-500 mt-0.5 leading-snug">{model.description}</p>
           </div>
         </div>
-
-        {/* Tab toggle */}
-        <div className="flex gap-1">
-          {(["results", "docs"] as const).map((t) => (
-            <button
-              key={t}
-              onClick={() => setTab(t)}
-              className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
-                tab === t
-                  ? "bg-blue-600 text-white shadow-sm"
-                  : "text-gray-500 hover:bg-gray-100"
-              }`}
-            >
-              {t === "results" ? "Predictions" : "Documentation"}
-            </button>
-          ))}
-        </div>
       </div>
 
       <div className="p-5 space-y-5">
-        {tab === "results" ? (
-          <>
-            {/* 4D */}
-            <div>
-              <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">
-                4D Prediction
-              </p>
-              <div className="flex items-center gap-2 mb-3">
-                {model.four_d.number.split("").map((d, i) => (
-                  <FourDBall key={i} digit={d} />
-                ))}
-              </div>
-              <ConfidenceMeter value={model.four_d.confidence} />
-              <p className="mt-2 text-xs text-gray-500 leading-relaxed">
-                {model.four_d.reasoning}
-              </p>
-            </div>
-
-            {/* Divider */}
-            <hr className="border-gray-100" />
-
-            {/* TOTO */}
-            <div>
-              <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">
-                TOTO System 12
-              </p>
-              <div className="mb-3">
-                <p className="text-xs text-gray-400 mb-1.5">Primary (6)</p>
-                <div className="flex flex-wrap gap-1.5">
-                  {model.toto.primary.map((n) => (
-                    <TotoBall key={`p-${n}`} number={n} />
-                  ))}
-                </div>
-              </div>
-              <div className="mb-3">
-                <p className="text-xs text-gray-400 mb-1.5">Supplementary (6)</p>
-                <div className="flex flex-wrap gap-1.5">
-                  {model.toto.supplementary.map((n) => (
-                    <TotoBall key={`s-${n}`} number={n} isSupplementary />
-                  ))}
-                </div>
-              </div>
-              <ConfidenceMeter value={model.toto.confidence} />
-              <p className="mt-2 text-xs text-gray-500 leading-relaxed">
-                {model.toto.reasoning}
-              </p>
-            </div>
-          </>
-        ) : (
-          <div className="space-y-4">
-            <DocSection label="Methodology" text={model.methodology} />
-            <DocSection label="Core Assumptions" text={model.assumptions} />
-            <DocSection label="Validation Approach" text={model.validation} />
-            <DocSection label="Confidence Indicators" text={model.confidence_note} />
+        {/* 4D */}
+        <div>
+          <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">
+            4D Prediction
+          </p>
+          <div className="flex items-center gap-2 mb-3">
+            {model.four_d.number.split("").map((d, i) => (
+              <FourDBall key={i} digit={d} />
+            ))}
           </div>
-        )}
+          <ConfidenceMeter value={model.four_d.confidence} />
+          <p className="mt-2 text-xs text-gray-500 leading-relaxed">
+            {model.four_d.reasoning}
+          </p>
+        </div>
+
+        {/* Divider */}
+        <hr className="border-gray-100" />
+
+        {/* TOTO */}
+        <div>
+          <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">
+            TOTO System 12
+          </p>
+          <div className="mb-3">
+            <p className="text-xs text-gray-400 mb-1.5">Primary (6)</p>
+            <div className="flex flex-wrap gap-1.5">
+              {model.toto.primary.map((n) => (
+                <TotoBall key={`p-${n}`} number={n} />
+              ))}
+            </div>
+          </div>
+          <div className="mb-3">
+            <p className="text-xs text-gray-400 mb-1.5">Supplementary (6)</p>
+            <div className="flex flex-wrap gap-1.5">
+              {model.toto.supplementary.map((n) => (
+                <TotoBall key={`s-${n}`} number={n} isSupplementary />
+              ))}
+            </div>
+          </div>
+          <ConfidenceMeter value={model.toto.confidence} />
+          <p className="mt-2 text-xs text-gray-500 leading-relaxed">
+            {model.toto.reasoning}
+          </p>
+        </div>
       </div>
     </div>
   );
