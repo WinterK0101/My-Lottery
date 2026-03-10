@@ -13,9 +13,9 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 try:
-    from .routers import extract, health, notifications, results, cron, tickets
+    from .routers import extract, health, notifications, prediction, results, cron, tickets
 except ImportError:
-    from routers import extract, health, notifications, results, cron, tickets
+    from routers import extract, health, notifications, prediction, results, cron, tickets
 
 app = FastAPI()
 
@@ -45,6 +45,7 @@ app.include_router(health.router)
 app.include_router(notifications.router)
 app.include_router(extract.router)
 app.include_router(results.router)
+app.include_router(prediction.router)
 app.include_router(cron.router)
 app.include_router(tickets.router)
 

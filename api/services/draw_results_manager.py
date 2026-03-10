@@ -352,7 +352,8 @@ class DrawResultsManager:
             # Parse results
             results = []
             for result in response.data:
-                winning_numbers = json.loads(result["winning_numbers"])
+                raw_wn = result["winning_numbers"]
+                winning_numbers = raw_wn if isinstance(raw_wn, dict) else json.loads(raw_wn)
                 results.append({
                     "game_type": result["game_type"],
                     "draw_date": result["draw_date"],

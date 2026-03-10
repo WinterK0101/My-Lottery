@@ -26,6 +26,13 @@ from .notification import (
     UserSubscriptionUpdate,
     UserSubscriptionResponse,
 )
+from .prediction import (
+    FourDPrediction,
+    TotoPrediction,
+    ModelPrediction,
+    PredictionResponse,
+    PredictionGenerateRequest,
+)
 
 __all__ = [
     # Ticket schemas
@@ -49,4 +56,10 @@ __all__ = [
     "UserSubscriptionCreate",
     "UserSubscriptionUpdate",
     "UserSubscriptionResponse",
+    # Prediction schemas
+    "FourDPrediction",
+    "TotoPrediction",
+    "ModelPrediction",
+    "PredictionResponse",
+    "PredictionGenerateRequest",
 ]
