@@ -43,6 +43,35 @@ router = APIRouter(prefix="/api/predictions", tags=["predictions"])
 # Helper utilities
 # ---------------------------------------------------------------------------
 
+def _weighted_choice_digit(counter: Counter) -> str:
+    """
+    Select from top 3 digits weighted by frequency.
+    More common digits are more likely, but less common ones can still be picked.
+    """
+    if not counter:
+        return str(random.randint(0, 9))
+    
+    top_candidates = counter.most_common(min(3, len(counter)))
+    digits = [digit for digit, _ in top_candidates]
+    weights = [count for _, count in top_candidates]
+    
+    return random.choices(digits, weights=weights, k=1)[0]
+
+
+def _weighted_choice_number(counter: Counter, max_num: int = 49) -> int:
+    """
+    Select from top 5 numbers/values weighted by frequency.
+    """
+    if not counter:
+        return random.randint(1, max_num)
+    
+    top_candidates = counter.most_common(min(5, len(counter)))
+    numbers = [num for num, _ in top_candidates]
+    weights = [count for _, count in top_candidates]
+    
+    return random.choices(numbers, weights=weights, k=1)[0]
+
+
 def _first_available(payload: Dict[str, Any], keys: Tuple[str, ...]) -> Any:
     """Return the first non-empty value found for the provided key aliases."""
     for key in keys:
@@ -164,14 +193,15 @@ def model_frequency(four_d_numbers: List[str], toto_sets: List[List[int]]) -> Mo
         for num in four_d_numbers:
             for i, d in enumerate(num):
                 pos_counters[i][d] += 1
+        # Use weighted random selection from top 3 frequent digits
         predicted_4d = ""
         for pos in pos_counters:
-            predicted_4d += pos.most_common(1)[0][0] if pos else str(random.randint(0, 9))
+            predicted_4d += _weighted_choice_digit(pos)
         freq_counts = [pos_counters[i].most_common(1)[0][1] if pos_counters[i] else 0 for i in range(4)]
         avg_freq = sum(freq_counts) / 4 if freq_counts else 0
         max_possible = len(four_d_numbers) if four_d_numbers else 1
         conf_4d = min(0.55, round(avg_freq / max_possible + 0.2, 3))
-        reason_4d = f"Each digit position was analysed across {len(four_d_numbers)} past results. The most frequent digit per position was selected."
+        reason_4d = f"Each digit position was analysed across {len(four_d_numbers)} past results. The most frequent digits per position were weighted and randomly selected."
     else:
         predicted_4d = "".join([str(random.randint(0, 9)) for _ in range(4)])
         conf_4d = 0.1
@@ -181,8 +211,14 @@ def model_frequency(four_d_numbers: List[str], toto_sets: List[List[int]]) -> Mo
     if toto_sets:
         flat = [n for s in toto_sets for n in s]
         counter = Counter(flat)
-        top12 = [num for num, _ in counter.most_common(12)]
-        # pad if needed
+        # Pick top ~15 candidates, then weighted-select 12
+        top_candidates = counter.most_common(15)
+        candidate_nums = [num for num, _ in top_candidates]
+        candidate_weights = [count for _, count in top_candidates]
+        
+        selected = random.choices(candidate_nums, weights=candidate_weights, k=12)
+        top12 = sorted(list(dict.fromkeys(selected)))  # Remove duplicates and sort
+        # Pad if needed
         while len(top12) < 12:
             candidate = random.randint(1, 49)
             if candidate not in top12:
@@ -191,7 +227,7 @@ def model_frequency(four_d_numbers: List[str], toto_sets: List[List[int]]) -> Mo
         primary = top12[:6]
         supplementary = top12[6:]
         conf_toto = round(min(0.5, counter.most_common(1)[0][1] / len(toto_sets) * 1.5), 3)
-        reason_toto = f"The 12 most frequently drawn TOTO numbers across {len(toto_sets)} draws were selected as System 12."
+        reason_toto = f"The 12 most frequently drawn TOTO numbers across {len(toto_sets)} draws were weighted and randomly selected as System 12."
     else:
         top12 = sorted(random.sample(range(1, 50), 12))
         primary = top12[:6]
@@ -257,17 +293,22 @@ def model_markov(four_d_numbers: List[str], toto_sets: List[List[int]]) -> Model
         for pos in range(4):
             trans = transitions[pos][last[pos]]
             if trans:
-                best_digit, best_count = trans.most_common(1)[0]
+                # Weighted selection from top 3 transitions
+                top_transitions = trans.most_common(min(3, len(trans)))
+                next_digits = [digit for digit, _ in top_transitions]
+                weights = [count for _, count in top_transitions]
+                selected_digit = random.choices(next_digits, weights=weights, k=1)[0]
+                
                 total = sum(trans.values())
-                conf_parts.append(best_count / total)
-                predicted_4d += best_digit
+                conf_parts.append(sum(dict(top_transitions).values()) / total)
+                predicted_4d += selected_digit
             else:
                 predicted_4d += str(random.randint(0, 9))
                 conf_parts.append(0.1)
         conf_4d = round(sum(conf_parts) / 4, 3)
         reason_4d = (
             f"Markov transitions from last drawn number '{last}' used. "
-            f"Each digit position follows its most probable next digit."
+            f"Each digit position follows its most probable next digits (weighted random)."
         )
     else:
         predicted_4d = "".join([str(random.randint(0, 9)) for _ in range(4)])
@@ -290,7 +331,12 @@ def model_markov(four_d_numbers: List[str], toto_sets: List[List[int]]) -> Model
             if pos < len(last_sorted):
                 trans = pos_transitions[pos][last_sorted[pos]]
                 if trans:
-                    primary.append(trans.most_common(1)[0][0])
+                    # Weighted selection from top 3 transitions
+                    top_trans = trans.most_common(min(3, len(trans)))
+                    next_nums = [num for num, _ in top_trans]
+                    weights = [count for _, count in top_trans]
+                    selected_num = random.choices(next_nums, weights=weights, k=1)[0]
+                    primary.append(selected_num)
                 else:
                     primary.append(last_sorted[pos])
             else:
@@ -321,7 +367,7 @@ def model_markov(four_d_numbers: List[str], toto_sets: List[List[int]]) -> Model
         conf_toto = 0.3
         reason_toto = (
             f"Position-wise Markov transitions from last draw {last_sorted} applied. "
-            "Each ball position follows its historically most likely next value."
+            "Each ball position follows weighted random selection from its most likely next values."
         )
     else:
         all12 = sorted(random.sample(range(1, 50), 12))
@@ -384,10 +430,19 @@ def model_gap(four_d_numbers: List[str], toto_sets: List[List[int]]) -> ModelPre
         predicted_4d = ""
         gaps = []
         for pos in range(4):
-            overdue = max(range(10), key=lambda d: n - 1 - last_seen[pos][str(d)])
-            gap = n - 1 - last_seen[pos][str(overdue)]
-            predicted_4d += str(overdue)
-            gaps.append(gap)
+            # Get gap score for each digit
+            gap_scores = {d: n - 1 - last_seen[pos][str(d)] for d in range(10)}
+            # Sort by gap (most overdue first)
+            sorted_gaps = sorted(gap_scores.items(), key=lambda x: x[1], reverse=True)
+            # Take top 3 most overdue, weighted by gap score
+            top_overdue = sorted_gaps[:3]
+            overdue_digits = [str(d) for d, _ in top_overdue]
+            gap_weights = [gap + 1 for _, gap in top_overdue]  # +1 to avoid zero weights
+            
+            selected_digit = random.choices(overdue_digits, weights=gap_weights, k=1)[0]
+            selected_gap = gap_scores[int(selected_digit)]
+            predicted_4d += selected_digit
+            gaps.append(selected_gap)
 
         avg_gap = sum(gaps) / 4
         conf_4d = round(min(0.5, avg_gap / n * 2), 3)
@@ -410,16 +465,31 @@ def model_gap(four_d_numbers: List[str], toto_sets: List[List[int]]) -> ModelPre
         n = len(toto_sets)
         all_numbers = list(range(1, 50))
         overdue_scores = {num: n - 1 - last_seen_toto[num] for num in all_numbers}
-        sorted_by_gap = sorted(all_numbers, key=lambda x: overdue_scores[x], reverse=True)
-        top12 = sorted(sorted_by_gap[:12])
+        
+        # Sort by gap and take top 20 overdue numbers
+        sorted_by_gap = sorted(overdue_scores.items(), key=lambda x: x[1], reverse=True)
+        top_20_overdue = sorted_by_gap[:20]
+        
+        # Weighted random selection from top 20 most overdue
+        overdue_nums = [num for num, _ in top_20_overdue]
+        overdue_weights = [gap + 1 for _, gap in top_20_overdue]  # +1 to avoid zero weights
+        
+        top12 = sorted(list(dict.fromkeys(
+            random.choices(overdue_nums, weights=overdue_weights, k=12)
+        )))
+        # Pad if needed
+        while len(top12) < 12:
+            candidate = random.randint(1, 49)
+            if candidate not in top12:
+                top12.append(candidate)
+        top12 = sorted(top12[:12])
         primary = top12[:6]
         supplementary = top12[6:]
 
         max_gap = max(overdue_scores.values())
         conf_toto = round(min(0.45, max_gap / n * 1.5), 3)
         reason_toto = (
-            f"The 12 most overdue TOTO numbers (not drawn for longest) selected across {n} draws. "
-            f"Max absence streak: {max_gap} draws."
+            f"The 12 most overdue TOTO numbers (weighted random selection, gaps up to {max_gap} draws) selected across {n} draws."
         )
     else:
         top12 = sorted(random.sample(range(1, 50), 12))
