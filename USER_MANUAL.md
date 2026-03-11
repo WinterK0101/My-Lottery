@@ -655,14 +655,136 @@ Response returns a `models` array with:
 
 ## 10.3 Implemented Prediction Models
 
-Frequency Analysis:
-Uses hot-number frequency patterns from historical results. For 4D, it evaluates digit frequency by position. For TOTO, it ranks numbers by historical occurrence and builds a System 12 suggestion from the most frequent values.
+Three distinct statistical models are implemented in `api/routers/prediction.py`. Each model is applied independently to both 4D and TOTO game types. All predictions are generated server-side and returned together in a single `/api/predictions/generate` response.
 
-Markov Chain:
-Uses first-order transitions between consecutive draws. For 4D, each digit position is modeled separately. For TOTO, sorted ball positions are used to estimate the most likely next values from the previous draw.
+---
 
-Gap / Due-Number Analysis:
-Tracks how long digits or numbers have been absent. For 4D, it looks for overdue digits by position. For TOTO, it ranks all 49 numbers by gap length and selects a weighted System 12 suggestion from the most overdue values.
+### Model 1 — Frequency Analysis
+
+**Why this model was chosen**
+
+Frequency analysis is the most intuitive starting point for any pattern-based lottery study. It directly answers the question "which numbers appear most often?" and serves as a natural baseline against which the other two models are compared. It is widely referenced in academic studies on lottery behaviour and requires minimal data pre-processing.
+
+**Core assumptions**
+
+- Lottery draws exhibit a non-uniform digit or number distribution over any finite historical sample.
+- Numbers that have appeared frequently ("hot numbers") continue to do so at above-average rates in the near term.
+- Draw results are statistically independent, but short-term frequency biases may persist within the available sample window.
+
+**How the model works (methodology)**
+
+For **4D**: Each of the four digit positions (thousands, hundreds, tens, units) is treated independently. A frequency counter tallies every digit (0–9) at each position across all historical 4D prize results (first, second, third, starter, and consolation prizes are all included). The top three most frequent digits per position are assembled into a weighted pool; one digit is randomly selected from that pool proportional to its frequency.
+
+For **TOTO**: All individual ball values from every historical draw are pooled into a single frequency table. The top 15 most-drawn candidates are assembled into a weighted pool; 12 values are drawn with replacement proportional to their frequencies, de-duplicated, and sorted to form a System 12 entry. The first 6 become the primary set and the remaining 6 become the supplementary set.
+
+**Evaluation and validation approach**
+
+Back-testing is performed on held-out draws (approximately the last 10% of available data). The metric is how often the predicted digit matches any digit in a prize-winning entry per position. The expected random baseline is approximately 10% per position (one correct digit in ten possible digits). The model is considered to add value when it exceeds this baseline by ≥5 percentage points in back-tests. For TOTO, the hit rate measures how many of the 12 predicted numbers appear in a held-out drawn set.
+
+**Confidence indicators and uncertainty levels**
+
+Confidence is computed as:
+
+```
+conf_4d = min(0.55, avg_freq / total_draws + 0.2)
+conf_toto = min(0.50, most_common_count / total_draws * 1.5)
+```
+
+The 0.55 ceiling reflects the inherent randomness of lottery draws. Larger datasets produce more stable digit-frequency estimates and push confidence closer to the ceiling. When fewer than 5 historical results are available, the model falls back to a random baseline and returns a confidence of `0.10`.
+
+---
+
+### Model 2 — Markov Chain
+
+**Why this model was chosen**
+
+A Markov chain models the system as a sequence of states where each state depends only on the immediately preceding state. This captures any short-term sequential dependency (draw-to-draw momentum) that a pure frequency table cannot. First-order Markov chains are computationally tractable, interpretable, and commonly applied in time-series and stochastic sequence modeling.
+
+**Core assumptions**
+
+- A first-order sequential dependency exists between consecutive lottery draws (the Markov property: the next draw depends only on the current draw, not on earlier history).
+- The transition probability matrix is stationary, meaning the probability of transitioning from digit A to digit B does not change over the observation period.
+- For TOTO, sorting ball values by magnitude before building transitions makes per-position comparisons meaningful across different draws.
+
+**How the model works (methodology)**
+
+A first-order Markov chain is constructed where each state represents a digit value (4D) or a ball value (TOTO). Transition probabilities P(next | current) are estimated by counting how many times each state is followed by each other state across consecutive draw pairs.
+
+For **4D**: Four separate transition matrices are built, one per digit position. Given the most recent drawn number, the last digit at each position is used as the current state. The top three most probable next digits are assembled into a weighted pool and one is selected proportionally by count. If no historical transition exists for a given current state, a random digit is used as a fallback.
+
+For **TOTO**: Six per-position transition matrices are built, where each position corresponds to the i-th value in a sorted draw. Given the last draw, each sorted ball position's successor is predicted by weighted random selection from its top three historical transitions. Supplementary numbers are then derived by small ±offset from the primary predictions.
+
+**Evaluation and validation approach**
+
+Walk-forward (out-of-sample) validation is used: the model is trained on draws 1 through N−k, then used to predict draw N−k+1. This is repeated for multiple values of k. The evaluation metric for TOTO is mean absolute error (MAE) per ball position compared to the actual next-draw values. The random baseline MAE for numbers in range 1–49 is approximately ±16. A useful Markov model should reduce this MAE. For 4D, the digit accuracy per position is compared to the 10% random baseline.
+
+**Confidence indicators and uncertainty levels**
+
+Confidence for the Markov model reflects the strength of the dominant transition:
+
+```
+conf_4d = average over positions of: sum(top_3_transition_counts) / total_transitions_from_current_state
+conf_toto = fixed at 0.30 (moderate uncertainty due to position-mapping assumptions)
+```
+
+Sparse transition matrices (rare digit or number pairs) significantly reduce confidence. The model requires at least four historical 4D results and at least three TOTO draws; below these thresholds it falls back to random selection with a confidence of `0.10`.
+
+---
+
+### Model 3 — Gap / Due-Number Analysis
+
+**Why this model was chosen**
+
+Gap analysis (also known as "due-number theory" or the "overdue number" heuristic) is the direct behavioural counterpart to frequency analysis. While frequency analysis selects hot numbers, gap analysis selects cold ones on the hypothesis that any number absent for many draws is "due" to reappear. This is academically studied as an example of the gambler's fallacy, making it a useful comparative benchmark that represents a distinct and widely-held lay belief about lottery outcomes.
+
+**Core assumptions**
+
+- The law of large numbers implies that each digit or number should converge towards equal frequency over a very long run; a prolonged absence is therefore a temporary deviation that will self-correct.
+- Absence streaks (gaps) provide a statistically meaningful selection signal within any finite sample window.
+- This model is explicitly understood as an academic benchmark based on the gambler's fallacy: it does not imply that lottery draws have memory, but it models the intuition that many players apply when choosing numbers.
+
+**How the model works (methodology)**
+
+A "last seen" index is tracked for every digit (4D) and ball value (TOTO) across all historical draws. The gap score for a digit or number is:
+
+```
+gap_score = current_draw_index - last_seen_index
+```
+
+A larger gap score means the value has been absent for more consecutive draws.
+
+For **4D**: Per digit position, all ten digits (0–9) are ranked by their gap score. The top three most overdue digits are assembled into a weighted pool where longer gaps receive proportionally higher weights. One digit is selected from this pool per position.
+
+For **TOTO**: All 49 ball values are ranked by gap score. The top 20 most overdue are assembled into a weighted pool. Twelve values are drawn with replacement proportional to their gap scores, de-duplicated, and sorted. The first 6 form the primary set and the remaining 6 form the supplementary set.
+
+**Evaluation and validation approach**
+
+Empirical back-testing measures the average gap length at which an overdue number actually reappears in subsequent draws. The hit rate of the top-12 overdue-number selection is compared against a random 12-number selection over multiple back-test windows. Because this model is theoretically grounded in the gambler's fallacy rather than genuine predictive signal, it is expected to perform at approximately random baseline levels over long runs, which serves as a calibration reference point for the other two models.
+
+**Confidence indicators and uncertainty levels**
+
+Confidence scales with the magnitude of the largest gap relative to total draws observed:
+
+```
+conf_4d = min(0.50, avg_gap / total_4d_draws * 2)
+conf_toto = min(0.45, max_gap / total_toto_draws * 1.5)
+```
+
+Longer draw histories produce more meaningful gap signals. However, due to the gambler's fallacy basis of this model, confidence is capped lower than the frequency model (0.45–0.50 maximum). A note in the API response explicitly states: "due-number theory has weak empirical support in true RNG draws." The model falls back to random selection with a confidence of `0.10` when fewer than five historical results are available.
+
+---
+
+### Summary Comparison
+
+| Attribute             | Frequency Analysis      | Markov Chain                 | Gap / Due-Number                       |
+| --------------------- | ----------------------- | ---------------------------- | -------------------------------------- |
+| Model key             | `frequency`             | `markov`                     | `gap`                                  |
+| Core idea             | Hot numbers appear more | Next draw follows the last   | Cold numbers are overdue               |
+| Data required (min)   | 1 result                | 4 results (4D), 3 (TOTO)     | 5 results                              |
+| Max confidence (4D)   | 0.55                    | ~0.70 (transition-dependent) | 0.50                                   |
+| Max confidence (TOTO) | 0.50                    | 0.30                         | 0.45                                   |
+| Theoretical basis     | Frequency distribution  | Stochastic sequence modeling | Gambler's fallacy (academic benchmark) |
+| Known limitation      | Ignores draw order      | Assumes stationarity         | No causal mechanism in RNG draws       |
 
 ## 10.4 Interpreting Prediction Output
 
